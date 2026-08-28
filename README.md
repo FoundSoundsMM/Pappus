@@ -34,7 +34,7 @@ norns. A grid is optional — everything is reachable without one.
 ## install
 
 ```
-;install https://github.com/YOURNAME/pappus
+;install https://github.com/FoundSoundsMM/pappus
 ```
 
 ## the chain
