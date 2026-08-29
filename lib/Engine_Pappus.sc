@@ -875,6 +875,19 @@ Engine_Pappus : CroneEngine {
 			fmix = (fwt * 0.5pi).cos;
 			fsend = (fwt * 0.5pi).sin;
 			presig = (pin * fmix) + (fsum * fsend);
+			// OUTPUT LIMITER, brickwall, -1 dB. The internal one a few lines up
+			// only ever saw fsum - the WET side - so a granulator boosted through
+			// DRY IN's +5 dB and left mostly dry would sail straight past it. This
+			// one sits after the MIX blend, on what RESONATOR actually hands to
+			// DELAY, so nothing downstream can get more than -1 dB out of this
+			// stage no matter how it got there.
+			//
+			// SOFT means the lookahead, not the ceiling - the ceiling is exact,
+			// Limiter.ar does not overshoot it by design, which is what BRICKWALL
+			// is. 50 ms is two and a half times the internal limiter's own 20 ms:
+			// slow enough that gain reduction eases in rather than grabbing, the
+			// same reasoning that one used against the master's 10 ms.
+			presig = Limiter.ar(presig, (-1).dbamp, 0.05);
 			mt3 = Amplitude.kr((presig[0] + presig[1]) * 0.5, 0.01, 0.2);
 			msig = presig;
 

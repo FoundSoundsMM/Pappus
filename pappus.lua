@@ -5671,7 +5671,7 @@ function draw_hallat()
           -- travel used to scale with level, but that read as the drawing
           -- stuttering rather than as the signal being loud, so speed is now
           -- constant and brightness (below) carries the feed amount instead.
-          local ph = filt_t * 4
+          local ph = filt_t * 2
           hal_flow(hal_wire(gi, b, lvl), amt, lvl, ph,
             util.clamp(math.floor(2 + (amt * 9)), 2, 12))
         end
