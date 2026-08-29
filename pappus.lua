@@ -4492,6 +4492,14 @@ function draw_waveform()
   local maxh = (WAVE_H / 2) - 1
   local sos = sos_amount(w)
   local locked = sos >= 0.999
+  -- The K3 LOCK toggle specifically, not the blended figure above: SOS
+  -- pinned at max also reads as fully frozen (sos_amount folds the two
+  -- together so the brightness/write-head logic below does not need to
+  -- care which one it is), but K3 only releases the toggle. Telling
+  -- someone to "HOLD K3 TO UNLOCK" when a snapshot loaded with SOS itself
+  -- maxed would be a lie - K3 flips lock_on straight back to false and the
+  -- buffer is still frozen because SOS never moved.
+  local lock_on = params:get(swid(w, "lock")) == 2
   local norm = math.max(V.wave_peak, 0.03)
   draw_swarm_badge(w, WAVE_TOP, WAVE_H)
 
@@ -4504,10 +4512,10 @@ function draw_waveform()
   -- the badge covers the first SWB_W columns, so the trace starts after it
   local ilo = math.max(wlo * WAVE_N, SWB_W + 1)
   local ihi = whi * WAVE_N
-  if locked then
-    -- SOS at max freezes the buffer, so the trace stops meaning anything -
-    -- it is the same picture forever until K3 lets go. Say that in words
-    -- instead of drawing a frozen waveform that looks like a live one.
+  if lock_on then
+    -- K3's own lock, not SOS pinned at max (that is `locked` below) - this
+    -- is the one case where the buffer is frozen for a reason K3 actually
+    -- releases, so it is the only case that gets to say so.
     -- norns' screen has no text_center - centering by hand with
     -- text_extents. A missing function here throws on every redraw while
     -- locked, which kills the redraw callback for good: the screen freezes
@@ -4522,7 +4530,10 @@ function draw_waveform()
     screen.move(midx - (screen.text_extents(l2) / 2), cy + 7)
     screen.text(l2)
   else
-    local inlev, outlev = 6, 2
+    -- SOS pinned at max freezes the buffer too, independently of K3 - a
+    -- performance move, not the toggle - so the trace still draws, just at
+    -- the same raised brightness `locked` already drove below.
+    local inlev, outlev = (locked and 9 or 6), (locked and 3 or 2)
     local lev = nil
     for i = SWB_W + 2, WAVE_N do
       local want = ((i - 1) >= ilo - 1 and (i - 1) <= ihi) and inlev or outlev
