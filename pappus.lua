@@ -198,7 +198,7 @@ local env_disp = 0
 local manual = {}
 for i = 1, NTAP do manual[i] = { step = (i - 1) * 2, on = (i <= 4) } end
 local taps = {}
-for i = 1, NTAP do taps[i] = { step = 0, on = false, time = 0, lvl = 0, pan = 0 } end
+for i = 1, NTAP do taps[i] = { step = 0, on = false, time = 0, lvl = 0, pan = 0, pitch = 0 } end
 local tap_flash = {}
 for i = 1, NTAP do tap_flash[i] = 0 end
 local stil_phase = 0
@@ -418,7 +418,7 @@ local PAGES = {
       { id = "s_in1", alt = "s_in2", label = "DRY IN", dual = true },
       { id = "s_euclid",   label = "EUCLID", mode = "s_steps" },
       { id = "s_rate",     label = "RATE",   mode = "s_link" },
-      { id = "s_spread",   label = "SPREAD" },
+      { id = "s_spread",   label = "SPREAD", mode = "s_pspread" },
       { id = "s_feedback", label = "FEEDBK" },
       { id = "s_tilt",     label = "TILT",   mode = "s_tilt_mode", bipolar = true },
       { id = "s_diffuse",  label = "DIFFUS" },
@@ -820,6 +820,25 @@ local function snap_to_scale(semi, sc)
     if d < bd then bd, best = d, v end
   end
   return (oct * 12) + best
+end
+
+-- DELAY's PITCH SPREAD, the second knob on the SPREAD cell. Same shape as
+-- PAN_BASE: a fixed value per tap SLOT, not per step, so it is a property of
+-- the tap the way the pan is, and does not reshuffle when EUCLID or the grid
+-- changes which slots are on. OCT & 5TH snaps that same ramp to the nearest
+-- octave-or-fifth; SCALE snaps it to the master scale instead of the tap's
+-- own semitones, reusing snap_to_scale exactly as GRAINSWARM's V.SPRD does.
+local PSPREAD_IV = { -12, -7, 0, 7, 12 }
+local function pspread_base(i)
+  return -12 + ((i - 1) * (24 / (NTAP - 1)))
+end
+local function snap_to_set(semi, set)
+  local best, bd = set[1], 999
+  for _, v in ipairs(set) do
+    local d = math.abs(v - semi)
+    if d < bd then bd, best = d, v end
+  end
+  return best
 end
 
 -- gates carries LEVEL, not just on/off: the engine already lags it and uses
@@ -1555,6 +1574,8 @@ local function update_timing()
   local n = SSTEPS[pval("s_steps")]
   local src = using_euclid() and euclid_taps() or manual
   local spread = pval("s_spread")
+  local pspread = pval("s_pspread")
+  local mscale = pval("m_scale")
   local nactive = 0
   for i = 1, NTAP do if src[i].on then nactive = nactive + 1 end end
   local norm = 1 / math.sqrt(math.max(nactive, 1))
@@ -1577,7 +1598,16 @@ local function update_timing()
     t.lvl = t.on and (norm * (1 - (0.35 * (t.step / n)))) or 0
     if link and t.on then t.lvl = t.lvl * gv.lvl end
     t.pan = PAN_BASE[i] * spread
-    sig[i] = string.format("%d%d%.2f", t.step, t.on and 1 or 0, t.lvl)
+    if pspread == 1 then
+      t.pitch = 0
+    elseif pspread == 2 then
+      t.pitch = pspread_base(i)
+    elseif pspread == 3 then
+      t.pitch = snap_to_set(pspread_base(i), PSPREAD_IV)
+    else
+      t.pitch = snap_to_scale(util.round(pspread_base(i)), mscale)
+    end
+    sig[i] = string.format("%d%d%.2f%.2f", t.step, t.on and 1 or 0, t.lvl, t.pitch)
   end
   local key = table.concat(sig, ",") .. ":" .. string.format("%.4f,%.3f", cycle, spread)
   if sent.taps ~= key then
@@ -1588,6 +1618,8 @@ local function update_timing()
                      taps[5].lvl, taps[6].lvl, taps[7].lvl, taps[8].lvl)
     engine.tappans(taps[1].pan, taps[2].pan, taps[3].pan, taps[4].pan,
                    taps[5].pan, taps[6].pan, taps[7].pan, taps[8].pan)
+    engine.tappitch(taps[1].pitch, taps[2].pitch, taps[3].pitch, taps[4].pitch,
+                    taps[5].pitch, taps[6].pitch, taps[7].pitch, taps[8].pitch)
   end
 end
 
@@ -2453,6 +2485,15 @@ local function add_params()
 
   params:add_control("s_spread", "spread",
     controlspec.new(0, 1, "lin", 0, 0.5, ""))
+
+  -- PITCH SPREAD, the second parameter on the SPREAD cell (E3). A "speed"
+  -- style repitch of the taps - not a time-stretched pitch shift - so each
+  -- mode just picks how the fixed -1..+1 octave ramp across the eight tap
+  -- slots is quantised: chromatic (OCT), octaves-and-fifths only (OCT+5TH),
+  -- or the master scale (SCALE), reusing the same degree logic as
+  -- GRAINSWARM's V.SPRD.
+  params:add_option("s_pspread", "pitch spread",
+    { "OFF", "OCT", "OCT+5TH", "SCALE" }, 1)
 
   params:add_control("s_feedback", "feedback",
     controlspec.new(0, 1, "lin", 0, 0.35, ""))

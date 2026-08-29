@@ -171,6 +171,10 @@ Engine_Pappus : CroneEngine {
 				taptimes = #[0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
 				taplevels = #[1, 0, 0, 0, 0, 0, 0, 0],
 				tappans = #[0, 0, 0, 0, 0, 0, 0, 0],
+				// PITCH SPREAD, in semitones - a per-tap read-speed offset, Lua's
+				// same 2**(n/12) convention as `pitches`. Zero is the ordinary
+				// unpitched tap.
+				tappitch = #[0, 0, 0, 0, 0, 0, 0, 0],
 				// COLOUR is always wet now - it is the colour stage, and a
 				// colour stage you can turn off is just a bypass with extra
 				// steps (which BYPASS already is). WOW takes the knob: a slow
@@ -909,14 +913,26 @@ Engine_Pappus : CroneEngine {
 			// same wire-buffer reason as FILTRU: eight read phases plus eight
 			// mono taps plus eight stereo pans alive at once is two dozen live
 			// interconnect buffers, and scsynth only has 64 in total.
+			// PITCH SPREAD gives each tap its own read speed rather than a
+			// fixed one-cycle-back offset: a Phasor per tap, resynced to the
+			// tap's nominal position once at synth start (Impulse.ar(0) fires
+			// exactly once) and free-running at ratio thereafter. A ratio away
+			// from 1 means the read head no longer tracks the write head at a
+			// constant distance - the same thing a mechanical multi-head tape
+			// delay does when one head's motor runs faster or slower than the
+			// others, which is the "speed style" repitch this is meant to be
+			// rather than a formant-preserving shift.
 			wetsig = DC.ar([0, 0]);
 			8.do { arg i;
 				var t = Lag.kr(taptimes[i], 0.08).clip(0.001, 10);
+				var ratio = 2 ** (Lag.kr(tappitch[i], lagt) / 12);
+				var resetpos = (dph - (t.max(0.0005) * SampleRate.ir))
+					.wrap(0, dframes);
 				// WOW moved to COLOUR, where it drifts the whole coloured
 				// signal instead of only the delay taps. The taps read
-				// straight now.
-				var ph = (dph - (t.max(0.0005) * SampleRate.ir))
-					.wrap(0, dframes);
+				// straight now, at PITCH SPREAD's ratio.
+				var ph = Phasor.ar(Impulse.ar(0),
+					BufRateScale.kr(dbuf.bufnum) * ratio, 0, dframes, resetpos);
 				wetsig = wetsig + Pan2.ar(BufRd.ar(1, dbuf.bufnum, ph, 1, 2),
 					Lag.kr(tappans[i], lagt), Lag.kr(taplevels[i], lagt));
 			};
@@ -1494,6 +1510,9 @@ Engine_Pappus : CroneEngine {
 		});
 		this.addCommand("tappans", "ffffffff", { arg msg;
 			synth.setn(\tappans, msg[1..8]);
+		});
+		this.addCommand("tappitch", "ffffffff", { arg msg;
+			synth.setn(\tappitch, msg[1..8]);
 		});
 
 		this.addCommand("drive", "f", { arg msg; synth.set(\drive, msg[1]); });
