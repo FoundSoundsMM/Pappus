@@ -405,7 +405,7 @@ local PAGES = {
       { id = "p_bright",    label = "BRIGHT" },
       { id = "p_damp",      label = "DAMP"   },
       { id = "p_pos",       label = "POSN"   },
-      { id = "p_grain",     label = "GRAIN"  },
+      { id = "p_grain",     label = "GRAIN", mode = "p_grain_type" },
       { id = "p_wet",       label = "WET"    },
     },
   },
@@ -2087,7 +2087,39 @@ end
 -- params
 -- ---------------------------------------------------------------------------
 
+-- NOISE's loop sources. Every .wav file sitting in audio/ becomes an option
+-- on the noise type menu, in alphabetical order by filename - drop a file
+-- in and it shows up here without touching this script. Engine_Pappus.sc's
+-- prAlloc runs the identical scan (same folder, same filter, same sort)
+-- over the same folder, so the two lists agree on count and order without
+-- either side telling the other; this is why the menu names come from the
+-- filename rather than from anything the engine reports back.
+local function scan_noise_loops()
+  local dir = _path.code .. norns.state.name .. "/audio/"
+  local names = {}
+  for _, f in ipairs(util.scandir(dir)) do
+    if f:lower():match("%.wav$") then
+      table.insert(names, f)
+    end
+  end
+  table.sort(names, function(a, b) return a:lower() < b:lower() end)
+  local labels = {}
+  for i, f in ipairs(names) do
+    labels[i] = f:gsub("%.[Ww][Aa][Vv]$", ""):upper()
+  end
+  return labels
+end
+
 local function add_params()
+  -- The noise-source list, built once and shared by NOISE (on COLOUR) and
+  -- GRAIN TYPE (on RESONATOR) - both pick from the same WHITE/PINK/DUST
+  -- plus whatever is in audio/, so there is exactly one scan and one list
+  -- rather than two that could drift apart.
+  local noise_types = { "WHITE", "PINK", "DUST" }
+  for _, label in ipairs(scan_noise_loops()) do
+    table.insert(noise_types, label)
+  end
+
   params:add_separator("grainswarm", "GRAINSWARM")
 
   params:add_control("m_pitch", "pitch",
@@ -2523,6 +2555,13 @@ local function add_params()
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("p_grain", function(x) engine.pgrain(x) end)
 
+  -- GRAIN TYPE: which texture GRAIN is mixing in, off the same list NOISE
+  -- offers on COLOUR - WHITE/PINK/DUST plus whatever is in audio/. A loop
+  -- here always plays at its own recorded speed; there is no tone control
+  -- on this page to re-time it with.
+  params:add_option("p_grain_type", "spettru grain type", noise_types, 2)
+  params:set_action("p_grain_type", function(x) engine.pgraintype(x) end)
+
   params:add_control("p_wet", "spettru wet",
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("p_wet", function(x) engine.pwet(x) end)
@@ -2625,18 +2664,13 @@ local function add_params()
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("noise", function(x) engine.noise(x) end)
 
-  -- Nine, in three groups of three. WHITE, PINK and DUST are washes; RAIN,
-  -- PINE and SEA are looped field recordings, where N.TONE re-times the
-  -- loop rather than filtering it - turn it down and the loop slows and
-  -- drops, turn it up and it speeds up and rises, 1200Hz being each loop's
-  -- own recorded speed. BELL, GLASS and PLUCK strike a six-partial
-  -- resonator bank with the same dust the others wash with, so the
-  -- envelope follower that used to sputter now rings: struck metal on
-  -- BELL, tapped glass on GLASS, and on PLUCK something close to a synth
-  -- string. N.TONE is the fundamental for all three rather than a filter
-  -- centre, and N.DEC still sets how busy the striking is.
-  params:add_option("noise_type", "noise type",
-    { "WHITE", "PINK", "DUST", "RAIN", "PINE", "SEA", "BELL", "GLASS", "PLUCK" }, 2)
+  -- WHITE, PINK and DUST are washes. Everything after that is whatever is
+  -- sitting in audio/ - RAIN, RICE, COUSCOUS, PINE and SEA out of the box,
+  -- plus anything a user drops in themselves. N.TONE re-times a loop rather
+  -- than filtering it - turn it down and the loop slows and drops, turn it
+  -- up and it speeds up and rises, 1200Hz being each loop's own recorded
+  -- speed.
+  params:add_option("noise_type", "noise type", noise_types, 2)
   params:set_action("noise_type", function(x) engine.noisetype(x) end)
 
   params:add_control("noise_decay", "noise decay",
@@ -6118,15 +6152,11 @@ function redraw()
   elseif c.id == "s_rate" then
     value = clock_label(params:get("s_rate"))
   elseif c.id == "noise_tone" then
-    -- the same knob means three things now: a filter centre on the three
-    -- washes, a PLAYBACK SPEED on the three looped sources (1200Hz is 1x),
-    -- and a FUNDAMENTAL on the three resonant sources, clamped to something
-    -- a struck object could plausibly be
+    -- the same knob means two things: a filter centre on the three washes,
+    -- a PLAYBACK SPEED on the loop sources (1200Hz is 1x, the file's own
+    -- recorded speed)
     local hz = pval("noise_tone")
-    local nt = params:get("noise_type")
-    if nt > 6 then
-      value = string.format("%.0fHz F0", util.clamp(hz, 60, 2000))
-    elseif nt > 3 then
+    if params:get("noise_type") > 3 then
       value = string.format("%.2fx", hz / 1200)
     else
       value = string.format("%.0fHz", hz)

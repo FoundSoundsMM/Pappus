@@ -13,7 +13,7 @@
 
 Engine_Pappus : CroneEngine {
 	var <synth, <buf, <bufr, <buf2, <buf2r, <dbuf, <envbufs, <patbuf, <patbuf2, <mbus;
-	var <rainbuf, <pinebuf, <seabuf;
+	var <loopbufs;
 	var bufdur = 60.0;
 	var deldur = 11.0;
 
@@ -50,7 +50,7 @@ Engine_Pappus : CroneEngine {
 
 	prAlloc {
 		var srv = context.server;
-		var envnums, patvals;
+		var envnums, patvals, audioDir;
 
 		// GRAINSWARM capture. TWO MONO BUFFERS PER GRANULATOR, left and
 		// right, because GrainBuf reads a mono buffer - "the buffer holding a
@@ -79,22 +79,25 @@ Engine_Pappus : CroneEngine {
 		// regenerates.
 		dbuf = Buffer.alloc(srv, (deldur * srv.sampleRate).asInteger, 1);
 
-		// NOISE's loop sources: RAIN, PINE and SEA, read once from disk
-		// rather than synthesised. They live in audio/ next to this class
-		// file's own directory, so the path is built from where THIS file
-		// is rather than assumed - the class still finds its samples
-		// however the script got installed. Their peaks are pre-matched in
-		// the files themselves (there is no cheap way to do it on the
-		// server after the fact), so this read is just a read.
-		rainbuf = Buffer.read(srv,
-			PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
-				++ "../audio/rain.wav");
-		pinebuf = Buffer.read(srv,
-			PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
-				++ "../audio/pine.wav");
-		seabuf = Buffer.read(srv,
-			PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
-				++ "../audio/sea.wav");
+		// NOISE's loop sources - every .wav file dropped into audio/, next
+		// to this class file's own directory, becomes a noise-type option,
+		// in alphabetical order by filename. Lua runs the identical scan
+		// (same folder, same filter, same sort - see scan_noise_loops in
+		// pappus.lua) to build the matching menu labels, so nobody has to
+		// keep two lists in sync by hand: drop a file into audio/ and it
+		// shows up on both sides in the same slot. There is no built-in
+		// level match between them - a dropped-in file is only as loud, in
+		// this mix, as its own recorded peak.
+		audioDir = PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
+			++ "../audio/";
+		loopbufs = [];
+		if(File.exists(audioDir)) {
+			var files = PathName(audioDir).files.select({ arg pn;
+				pn.extension.toLower == "wav" });
+			files = files.sort({ arg a, b;
+				a.fileName.toLower < b.fileName.toLower });
+			loopbufs = files.collect({ arg pn; Buffer.read(srv, pn.fullPath) });
+		};
 		srv.sync;
 
 		// EUCLID's gate pattern, sixteen steps. Starts all-open, which is what
@@ -164,7 +167,7 @@ Engine_Pappus : CroneEngine {
 				pvfrq = #[0, 0, 0, 0, 0, 0, 0, 0],
 				pvamp = #[0, 0, 0, 0, 0, 0, 0, 0],
 				pdamp = 0.35, pbright = 0.5, pstruct = 0, ppos = 0.18,
-				pmodel = 1, pgrain = 0, pwet = 0,
+				pmodel = 1, pgrain = 0, pgraintype = 2, pwet = 0,
 				mscan = 0.666, mscanmode = 1, mdelay = 0.25,
 				mspray = 0, mspraymode = 1, melen = 1, mephase = 0,
 				mswarm = 0, mswarmmode = 1, mlock = 0, msos = 0, mtilt = 0,
@@ -247,7 +250,7 @@ Engine_Pappus : CroneEngine {
 			var lagt = 0.02, envref = 0.5;
 			var in, frnd, mkgrain, graw, graw2, gsum, gsum2, gfeed, msig;
 			var prng, pfl, pfr, pal, par, pones;
-			var plfb, pana, pmono, pbrhz, pnoiz;
+			var plfb, pana, pmono, pbrhz, pnoiz, pgwash, pgloop, pglp;
 			var fmodal, fstring, mfade;
 			var svfrq, svamp, sdec, sdet, spos;
 			var pin, kin, omix, mcp;
@@ -261,8 +264,7 @@ Engine_Pappus : CroneEngine {
 			var bits, q, fb, pre, bc, jit, sr, rd, br, crushed, crushfb, kout;
 			var lmono, lchain, lthr, lossmono, ldry, lossed, lmix;
 			var lo, hi, nwhite, npink, ndust, nwash, nz;
-			var nres, nlp, nexc, nf0, nsel, nring, nrat, nbamp, nbank;
-			var nloopsel, nlooprate, nrain, npine, nsea, nloop;
+			var nlp, nloopsel, nlooprate, nloop;
 			var mixed, sent, outsig;
 			var mt1, mt2, mt3, mt4, mt5, mt6;
 
@@ -785,7 +787,32 @@ Engine_Pappus : CroneEngine {
 			// it read as texture ON the excitation and not a second source mixed
 			// in beside it. Filtered ahead of BRIGHTNESS's own filter, so the
 			// noise gets exactly the same tonal shaping the grains do.
-			pnoiz = BPF.ar(WhiteNoise.ar(1), 2200, 0.5)
+			//
+			// GRAIN TYPE picks WHICH texture, off the same list NOISE offers on
+			// COLOUR: WHITE, PINK and DUST as washes, then whatever loop files
+			// are sitting in audio/ (see NOISE's own comment for how that
+			// folder gets scanned). Separate generators from COLOUR's own -
+			// this excitation sits earlier in the chain and needs its own
+			// copies regardless of what COLOUR is doing with its noise. The
+			// loops play at their own recorded speed; there is no tone control
+			// here to re-time them with.
+			pgwash = Select.ar((pgraintype - 1).clip(0, 2),
+				[WhiteNoise.ar(1), PinkNoise.ar(1.6), Dust2.ar(1800)]);
+			pgwash = BPF.ar(pgwash, 2200, 0.5);
+			if(loopbufs.size > 0) {
+				var sel = (pgraintype - 4).clip(0, loopbufs.size - 1);
+				var sigs = loopbufs.collect({ arg b;
+					var s = PlayBuf.ar(2, b.bufnum,
+						BufRateScale.kr(b.bufnum), loop: 1);
+					(s[0] + s[1]) * 0.5;
+				});
+				pgloop = Select.ar(sel, sigs);
+				pglp = Lag.kr(pgraintype > 3.5, 0.05);
+			} {
+				pgloop = DC.ar(0);
+				pglp = DC.kr(0);
+			};
+			pnoiz = ((pgwash * (1 - pglp)) + (pgloop * pglp))
 				* Amplitude.ar(pmono, 0.003, 0.05)
 				* Lag.kr(pgrain, lagt).clip(0, 1) * 4;
 			pana = pmono + pnoiz;
@@ -1142,30 +1169,14 @@ Engine_Pappus : CroneEngine {
 
 			// ---- NOISE ----
 			//
-			// Nine sources in three groups of three. WHITE, PINK and DUST are
-			// raw washes; RAIN, PINE and SEA are looped field recordings; BELL,
-			// GLASS and PLUCK are a six-partial resonator bank STRUCK by the
-			// dust, which turns the same envelope-following sputter into
-			// struck metal, tapped glass or a plucked string depending only on
-			// how the bank is tuned.
-			//
-			// One bank, not three. The partial ratios and the ring time are
-			// chosen at CONTROL rate, so the three characters cost three
-			// arrays of numbers rather than three banks of filters - and the
-			// bank is a single DynKlank, which is a whole resonator set for
-			// the price of one input and one output.
-			//
-			// The ratios are what make the character, and they are not
-			// arbitrary:
-			//   BELL   1, 2.76, 5.40, 8.93, 13.34, 18.64 - the classic
-			//          circular-plate series. Wildly inharmonic, which is why
-			//          a bell has a pitch you can name and a sound you cannot
-			//          sing.
-			//   GLASS  1, 2.32, 4.25, 6.63, 9.38, 12.22 - tighter and
-			//          brighter, the ratios of a struck tube rather than a
-			//          plate, with a short ring so it taps instead of tolls.
-			//   PLUCK  1..6, dead harmonic, and a ring so short the bank
-			//          reads as a string rather than as a resonance.
+			// Two groups. WHITE, PINK and DUST are raw washes, synthesised.
+			// After that, every .wav file that happens to be sitting in
+			// audio/ next to this class - RAIN, RICE, COUSCOUS, PINE, SEA
+			// out of the box, but a user can add or remove their own and the
+			// menu follows without touching this file. LOOPBUFS is built at
+			// alloc time by scanning that folder (see prAlloc), so the
+			// number of loop UGens below is whatever was found on disk, not
+			// a fixed six.
 			nwhite = { WhiteNoise.ar(1) } ! 2;
 			npink = { PinkNoise.ar(1.6) } ! 2;
 			ndust = { Dust2.ar(1800) } ! 2;
@@ -1175,105 +1186,42 @@ Engine_Pappus : CroneEngine {
 				Select.ar((noisetype - 1).clip(0, 2),
 					[nwhite[1], npink[1], ndust[1]])
 			];
-
-			// RAIN, PINE and SEA - the same slot WHITE/PINK/DUST fill, but
-			// read off disk once at alloc rather than generated. N.TONE is
-			// not a filter here: it re-times the loop, exactly as it is a
-			// FUNDAMENTAL for the resonant three rather than a filter centre.
-			// 1200 Hz, the knob's resting value, plays each loop at its own
-			// recorded speed; turning it down slows and drops the loop,
-			// turning it up speeds it up and raises it.
-			nloopsel = (noisetype - 4).clip(0, 2);
-			nlooprate = Lag.kr(noisetone, 0.05) / 1200;
-			nrain = PlayBuf.ar(2, rainbuf.bufnum,
-				nlooprate * BufRateScale.kr(rainbuf.bufnum), loop: 1);
-			npine = PlayBuf.ar(2, pinebuf.bufnum,
-				nlooprate * BufRateScale.kr(pinebuf.bufnum), loop: 1);
-			nsea = PlayBuf.ar(2, seabuf.bufnum,
-				nlooprate * BufRateScale.kr(seabuf.bufnum), loop: 1);
-			nloop = [
-				Select.ar(nloopsel, [nrain[0], npine[0], nsea[0]]),
-				Select.ar(nloopsel, [nrain[1], npine[1], nsea[1]])
-			];
-			// Unmeasured, unlike the bank below - normalised recordings still
-			// run far hotter in RMS than a synthesised wash at the same peak,
-			// so pulled well back by ear. Revisit if one source dominates.
-			nloop = nloop * 0.35;
-
-			// which of the three groups is live, each smoothed on its own so
-			// switching between any two of them crossfades rather than jumps
-			nres = Lag.kr(noisetype > 6.5, 0.05);
-			nlp = Lag.kr((noisetype > 3.5) * (noisetype < 6.5), 0.05);
-
-			// The excitation for the bank is always DUST - a resonator wants
-			// hits, not a wash. Density rides on N.DEC so the same knob that
-			// sets the dust's throw on the COLOUR page sets how busy the
-			// plucking is.
-			nexc = (ndust[0] + ndust[1]) * 0.5;
-			nexc = Decay.ar(nexc, 0.002) * 0.6;
-
-			// The fundamental is N.TONE, but held to something a resonator
-			// can be: twelve kilohertz is a sensible top for a band-pass and
-			// an absurd one for a struck bell.
-			nf0 = Lag.kr(noisetone, 0.05).clip(60, 2000);
-			nsel = (noisetype - 7).clip(0, 2);
-			nring = Select.kr(nsel, [2.6, 0.7, 0.11]);
-			nrat = [
-				Select.kr(nsel, [1, 1, 1]),
-				Select.kr(nsel, [2.76, 2.32, 2]),
-				Select.kr(nsel, [5.40, 4.25, 3]),
-				Select.kr(nsel, [8.93, 6.63, 4]),
-				Select.kr(nsel, [13.34, 9.38, 5]),
-				Select.kr(nsel, [18.64, 12.22, 6])
-			];
-			// amplitudes fall away up the series, steeply for PLUCK where the
-			// top partials are what makes a string sound like a bell instead
-			nbamp = [
-				1,
-				Select.kr(nsel, [0.62, 0.70, 0.45]),
-				Select.kr(nsel, [0.42, 0.52, 0.26]),
-				Select.kr(nsel, [0.28, 0.38, 0.15]),
-				Select.kr(nsel, [0.18, 0.27, 0.09]),
-				Select.kr(nsel, [0.11, 0.19, 0.05])
-			];
-			nbank = DynKlank.ar(`[
-				nrat.collect({ arg r; (r * nf0).clip(30, 16000) }),
-				nbamp,
-				nring ! 6
-			], nexc, 1, 0, 1);
-
-			// LEVEL-MATCHED to the three washes, and to each other.
-			//
-			// Straight out of the bank, BELL measured 21.6 dB hotter than
-			// PINK - so what read as "a nicer noise source" was mostly "a
-			// much louder one", and the three rang at different levels among
-			// themselves too. A resonator holds energy in proportion to how
-			// long it rings, and measured across these three ring times the
-			// dependence is about a fourth power, not the square root you
-			// would guess: bell/glass is 3.7x the ring for 2.0 dB, glass/pluck
-			// 6.4x for 3.6 dB.
-			//
-			// The exponent is SOLVED, not guessed. Rendering the three at a
-			// known exponent gives their uncorrected levels; setting those
-			// equal gives 0.587, and at that value the three land within
-			// 0.05 dB of each other and within a decibel of the washes. The
-			// first guess was a fourth root - the reasoning was fine and the
-			// number was less than half what it needed to be.
-			//
-			// (The very first measurement said 21.6 dB hot and it was
-			// understated: at that level the peaks were sitting in the master
-			// limiter, so what came back was already compressed.)
-			nbank = nbank * (0.085 / (((nring * 10) + 1) ** 0.587));
-			nbank = LeakDC.ar(nbank);
-			// panned by a slow wander so a bank of six mono resonators does
-			// not sit in a point in the middle of the image
-			nbank = Pan2.ar(nbank, LFNoise2.kr(0.13) * 0.6);
-
-			// the raw noises are band-passed; the loops are re-timed instead
-			// (above); the bank is neither - it IS a filter
 			nwash = BPF.ar(nwash, Lag.kr(noisetone, lagt).clip(60, 12000), 0.8)
 				* 2.5;
-			nz = (nwash * (1 - nres - nlp)) + (nloop * nlp) + (nbank * nres);
+
+			// The loops are re-timed rather than filtered - N.TONE moves the
+			// playback rate, not a filter centre, so turning it down slows
+			// and drops a loop and turning it up speeds it up and raises it.
+			// 1200 Hz, the knob's resting value, is each file's own recorded
+			// speed. One rate control for all of them, and NLOOPN of them
+			// running at once regardless of which is selected - that is the
+			// same "always compute, only pick at the end" shape WHITE/PINK/
+			// DUST already use above, just over a list whose length is not
+			// known until the folder is scanned.
+			if(loopbufs.size > 0) {
+				var nloopn = loopbufs.size;
+				var nloopsigs;
+				nloopsel = (noisetype - 4).clip(0, nloopn - 1);
+				nlooprate = Lag.kr(noisetone, 0.05) / 1200;
+				nloopsigs = loopbufs.collect({ arg b;
+					PlayBuf.ar(2, b.bufnum,
+						nlooprate * BufRateScale.kr(b.bufnum), loop: 1);
+				});
+				nloop = [
+					Select.ar(nloopsel, nloopsigs.collect({ arg s; s[0] })),
+					Select.ar(nloopsel, nloopsigs.collect({ arg s; s[1] }))
+				];
+				// Unmeasured and un-levelled: a file dropped into audio/ has
+				// not been matched to anything, so this is only a sanity
+				// gain against the washes' own level, not a promise.
+				nloop = nloop * 0.35;
+				nlp = Lag.kr(noisetype > 3.5, 0.05);
+			} {
+				nloop = [Silent.ar, Silent.ar];
+				nlp = DC.kr(0);
+			};
+
+			nz = (nwash * (1 - nlp)) + (nloop * nlp);
 			sig = sig + (nz * env * ns * 4);
 
 			// ---- OUT ----
@@ -1563,6 +1511,7 @@ Engine_Pappus : CroneEngine {
 		this.addCommand("ppos", "f", { arg msg; synth.set(\ppos, msg[1]); });
 		this.addCommand("pmodel", "i", { arg msg; synth.set(\pmodel, msg[1]); });
 		this.addCommand("pgrain", "f", { arg msg; synth.set(\pgrain, msg[1]); });
+		this.addCommand("pgraintype", "i", { arg msg; synth.set(\pgraintype, msg[1]); });
 		this.addCommand("pwet", "f", { arg msg; synth.set(\pwet, msg[1]); });
 
 		// one message for all eight voices, so a grid press is a single set

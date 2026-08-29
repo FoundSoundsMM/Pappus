@@ -128,7 +128,7 @@ step("extreme params", function()
     params:set_raw(id, 1); tick(3, 0.2)
   end
   for _, id in ipairs({ "m_scan_mode", "m_spray_mode", "m_rate", "m_scale",
-                        "crush_mode", "noise_type",
+                        "crush_mode", "noise_type", "p_grain_type",
                         "m_swarm_mode", "n_swarm_mode", "n_lock", "m_lock", "bypass",
                         "m_src", "n_src",
                         "s_steps", "s_tilt_mode", "s_hold",
