@@ -386,7 +386,7 @@ params:set("env_d1", 1); params:set("env_d2", 1)
 goto_page(PG[10])
 settle(30, 0.35, true); shot("11 SIGNAL flat")
 
-params:set("mx_in", 4); params:set("mx_comp", 0.4)
+params:set("mx_comp", 0.4)
 params:set("p_in1", 0.9); params:set("p_in2", 0.2)
 params:set("k_in1", 0.0); params:set("o_in1", 0.8)
 settle(30, 0.5, true); shot("11 SIGNAL sends up, pre-fader")

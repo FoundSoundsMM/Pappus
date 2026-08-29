@@ -199,8 +199,14 @@ function M.install(engine_sc_path)
     linlin = function(a, b, c, d, v)
       return c + (v - a) / (b - a) * (d - c)
     end,
+    -- no audio/ folder off-device, so the noise-loop scan finds nothing and
+    -- NOISE falls back to just WHITE/PINK/DUST
+    scandir = function() return {} end,
   }
   M.now = 1000.0
+  -- scan_noise_loops() builds a path off this before it ever gets to
+  -- scandir, so it has to exist even though scandir ignores it
+  _G._path = { code = "/tmp/mock-pappus-code/" }
 
   -- Screen ops are recorded verbatim so a rasteriser can draw exactly what
   -- norns would draw, rather than a re-implementation of the same maths.

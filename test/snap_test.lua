@@ -1,9 +1,14 @@
 -- SNAPSHOTS: one hundred and twenty snapshots.
 --
---   * a hold on a grid slot saves; a tap loads; the whole 15x8 is addressable
+--   * column 16 is split: rows 1-4 arm SAVE, rows 5-8 arm CLEAR. With one of
+--     those held, a slot press is still a HOLD - the square fills or drains
+--     with the finger and letting go early backs out with nothing changed,
+--     exactly as a bare hold used to. With NEITHER half held, a slot press is
+--     an immediate, non-destructive load - the whole 15x8 is addressable
+--   * holding a slot with no column-16 modifier down does nothing but load it
+--     - there is no way to save or clear without a modifier, at any duration
 --   * saving FREEZES the buffer and asks the engine to write it
 --   * loading ducks the output, swaps everything, and brings it back
---   * a held column-16 key makes taps destructive, and only while held
 --   * long K2 clears the selected slot, pushes do clear/load/save
 --   * the fill animation runs up on save and back down on clear
 --   * you can still leave the page (it is last in the lane now, so K2 is the
@@ -30,11 +35,22 @@ goto_page_index(PG)
 
 local st = snap_state()
 
-local function hold(x, y)
-  mock.grid.key(x, y, 1); mock.advance_time(1.0); mock.grid.key(x, y, 0)
-end
 local function tapg(x, y)
   mock.grid.key(x, y, 1); mock.advance_time(0.05); mock.grid.key(x, y, 0)
+end
+-- SAVE modifier (any row 1-4 of column 16), held across a full hold on a
+-- slot - the modifier arms it, but the slot press still has to be held long
+-- enough to commit, same as a bare hold always was.
+local function save_slot(x, y)
+  mock.grid.key(16, 1, 1)
+  mock.grid.key(x, y, 1); mock.advance_time(1.0); mock.grid.key(x, y, 0)
+  mock.grid.key(16, 1, 0)
+end
+-- CLEAR modifier: any row 5-8 of column 16, same shape as save_slot
+local function clear_slot(x, y)
+  mock.grid.key(16, 6, 1)
+  mock.grid.key(x, y, 1); mock.advance_time(1.0); mock.grid.key(x, y, 0)
+  mock.grid.key(16, 6, 0)
 end
 local function frames(n)
   for _ = 1, n do snap_advance(1 / 25) end
@@ -49,8 +65,8 @@ params:set("drive", 0.2); params:set("crush_mode", 1)
 gr(1)[3].on = true; gr(1)[3].semi = 4
 gr(2)[3].on = false
 gr(2)[5].on = true; gr(2)[5].semi = 9
-hold(1, 1)
-check(snap_occupied(1), "a hold on slot 1 did not save")
+save_slot(1, 1)
+check(snap_occupied(1), "holding SAVE and tapping slot 1 did not save")
 check(params:get("m_lock") == 2, "saving did not freeze the buffer")
 check(params:get("n_lock") == 2,
   "saving froze GRAINSWARM 1's buffer but left 2's still recording, so what "
@@ -67,7 +83,7 @@ check(mock.calls.last["snapwrite"][1] == 4,
 
 -- the far corner: slot 120
 params:set("drive", 0.77)
-hold(15, 8)
+save_slot(15, 8)
 check(snap_occupied(120), "slot 120 (col 15, row 8) did not save")
 
 -- load slot 1 back
@@ -110,7 +126,7 @@ check(params:get("m_src") == 1 and params:get("n_src") == 1,
 -- key out of a stored scene, which is exactly the shape of an old snapshot
 -- saved before a parameter existed.
 params:set("crush", 0.0)
-hold(5, 5)                                    -- slot 65: saved with CRUSH at 0
+save_slot(5, 5)                               -- slot 65: saved with CRUSH at 0
 params:set("crush", 0.85)
 scene_table()[65].p["crush"] = nil            -- ...and now it never stored it
 tapg(5, 5)
@@ -131,29 +147,48 @@ check(params:get("lfo1_d1") == 1,
 check(mock.calls.engine["bufclear"] ~= nil,
   "an empty slot did not clear the buffer")
 
--- CLEAR is only destructive while a column-16 key is held
+-- CLEAR is only destructive while the bottom half (rows 5-8) of column 16 is
+-- held AND the slot itself is held long enough - the top half (SAVE) does
+-- not arm it, even though it is the same column
 tapg(1, 1)                                  -- harmless: loads
 check(snap_occupied(1), "a plain tap cleared a slot")
-mock.grid.key(16, 1, 1)
-check(st.clear, "holding column 16 did not arm CLEAR")
+mock.grid.key(16, 6, 1)                     -- row 6: bottom half
+do
+  local save_held, clear_held = snap_mods(st)
+  check(clear_held and not save_held,
+    "holding row 6 of column 16 did not arm CLEAR alone")
+end
 mock.grid.key(1, 1, 1); mock.advance_time(1.0); mock.grid.key(1, 1, 0)
-check(not snap_occupied(1), "armed CLEAR did not clear the slot")
-mock.grid.key(16, 1, 0)
-check(not st.clear, "CLEAR stayed armed after the key came up")
-hold(1, 1)
+check(not snap_occupied(1), "a completed CLEAR hold did not clear the slot")
+mock.grid.key(16, 6, 0)
+do
+  local _, clear_held = snap_mods(st)
+  check(not clear_held, "CLEAR stayed armed after the key came up")
+end
+save_slot(1, 1)
 tapg(1, 1)
-check(snap_occupied(1), "a tap cleared a slot with CLEAR disarmed")
+check(snap_occupied(1), "a plain tap cleared a slot with CLEAR disarmed")
 
--- The hold IS the animation: the square fills while the key is down, and
--- letting go early drains it back with nothing saved.
+-- and holding a bare slot, with neither half of column 16 down, never saves
+-- or clears it, no matter how long it is held - it is just a (harmless,
+-- immediate) load
+snap_clear(2)
+mock.grid.key(2, 1, 1); mock.advance_time(1.0); mock.grid.key(2, 1, 0)
+check(not snap_occupied(2),
+  "holding a plain slot with no modifier saved it anyway")
+
+-- The hold IS the animation, same as a bare hold always was - it just now
+-- only runs while a modifier is held. The square fills while the key is
+-- down, and letting go early drains it back with nothing saved.
 snap_clear(1)
 frames(30)
 check(st.fill[1] < 0.05, "slot 1 did not start empty")
+mock.grid.key(16, 1, 1)                     -- arm SAVE
 mock.grid.key(1, 1, 1)
 mock.advance_time(0.2); frames(1)
 local part = st.fill[1]
 check(part > 0.05 and part < 0.9,
-  "a third of the way through a hold the fill was " .. part)
+  "partway through a SAVE hold the fill was " .. part)
 mock.advance_time(0.1); frames(1)
 check(st.fill[1] > part, "the fill did not keep rising with the hold")
 -- ...and abandoning it puts everything back
@@ -162,31 +197,34 @@ check(not snap_occupied(1), "an abandoned hold saved anyway")
 frames(30)
 check(st.fill[1] < 0.05,
   "an abandoned hold left the fill at " .. st.fill[1])
+mock.grid.key(16, 1, 0)
 
 -- carried through to the end, it commits WHILE HELD and pulses
+mock.grid.key(16, 1, 1)
 mock.grid.key(1, 1, 1)
 mock.advance_time(0.7); frames(1)
 check(snap_occupied(1), "a completed hold did not save while still held")
 check((st.pulse[1] or 0) > 0.5, "a completed hold did not pulse")
 mock.grid.key(1, 1, 0)
 check(snap_occupied(1), "the release after a completed hold undid it")
+mock.grid.key(16, 1, 0)
 frames(30)
 check((st.pulse[1] or 0) == 0, "the pulse did not settle back down")
 
--- and the clear hold drains rather than fills
-mock.grid.key(16, 3, 1)
+-- and the CLEAR half drains rather than fills
+mock.grid.key(16, 6, 1)
 mock.grid.key(1, 1, 1)
 mock.advance_time(0.2); frames(1)
 check(st.fill[1] < 0.95 and st.fill[1] > 0.1,
-  "a clear hold did not drain part way, it was " .. st.fill[1])
+  "a CLEAR hold did not drain part way, it was " .. st.fill[1])
 mock.advance_time(0.6); frames(1)
-check(not snap_occupied(1), "the clear hold did not clear")
-mock.grid.key(1, 1, 0); mock.grid.key(16, 3, 0)
+check(not snap_occupied(1), "the CLEAR hold did not clear")
+mock.grid.key(1, 1, 0); mock.grid.key(16, 6, 0)
 frames(30)
 check(st.fill[1] < 0.05, "the fill did not reach zero after a clear")
 
 -- Without a grid: long K2 loads, long K3 saves, a long hold of BOTH clears.
-hold(3, 2)
+save_slot(3, 2)
 check(snap_occupied(18), "could not save slot 18")
 st.sel = 18
 params:set("drive", 0.5)
@@ -196,7 +234,7 @@ key(2, 1); key(3, 1); mock.advance_time(0.6)
 key(3, 0); key(2, 0)                              -- long K2+K3 clears
 check(not snap_occupied(18), "a long hold of both keys did not clear")
 -- ...and a SHORT hold of both is still the lane change, not a clear
-hold(3, 2)
+save_slot(3, 2)
 check(snap_occupied(18), "could not save slot 18 again")
 key(2, 1); key(3, 1); key(3, 0); key(2, 0)
 check(snap_occupied(18), "a short K2+K3 cleared a slot")
@@ -232,7 +270,7 @@ check(st.sel == 1, "E2 should clamp at 1, landed on " .. st.sel)
 -- display's own model of the waveform travels with it.
 snap_clear(9)
 for i = 1, 8 do VS[1].wave[i] = i / 8; VS[2].wave[i] = 1 - (i / 8) end
-hold(9, 1)                                  -- slot 9
+save_slot(9, 1)                             -- slot 9
 for i = 1, 8 do VS[1].wave[i] = 0; VS[2].wave[i] = 0 end
 tapg(9, 1)
 check(math.abs(VS[1].wave[4] - 0.5) < 0.01,

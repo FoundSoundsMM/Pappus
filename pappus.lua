@@ -231,6 +231,18 @@ for i = 1, NVOICE do
 end
 function gr(w) return (w == 2) and grains2 or grains end
 
+-- RESONATOR's OWN eight voices, edited by the grid on the RESONATOR page
+-- exactly like a grainswarm chord - but it belongs to neither granulator.
+-- FREQUENCY mode GRID reads this instead of borrowing whichever swarm is
+-- feeding the bank harder, so the bank can hold a chord of its own.
+--
+-- Global for the same reason as grains2: the main chunk is already at Lua's
+-- 200-local ceiling.
+sp_chord = {}
+for i = 1, NVOICE do
+  sp_chord[i] = { on = (i == 1), semi = 0, oct = 3, lvl = 1 }
+end
+
 -- Parameter prefixes for the pair, and the rule that GRAINSWARM 1 IS THE
 -- PARENT. Two things are deliberately not duplicated:
 --
@@ -475,7 +487,13 @@ local PAGES = {
       -- are gone: how loud a module is in the mix is decided by how much is
       -- fed into it, which is one idea instead of two that fight.
       { id = "o_in1", alt = "o_in2", label = "DRY IN", dual = true },
-      { id = "mx_in",    label = "IN"    },
+      -- REVERB, ahead of COMP: a compressor holds a mix together, so it
+      -- belongs after everything that is still shaping the mix, reverb
+      -- included. REVERB is AMOUNT - wet, size and decay on one knob - and
+      -- SHIFT is the shimmer send, with its interval (an octave, a fifth, or
+      -- the current SCALE's own fifth) on its mode.
+      { id = "r_verb",  label = "REVERB" },
+      { id = "r_shift", label = "SHIFT", mode = "r_shift_mode" },
       { id = "mx_comp",  label = "COMP"  },
       { id = "mx_limit", label = "LIMIT" },
       { id = "mx_out",   label = "LEVEL" },
@@ -784,11 +802,11 @@ local function bump(id, d, fine)
   -- in the display. There is no finer-than-a-semitone to type, so fine and
   -- coarse match.
   --
-  -- The threshold matters: several dB faders (mx_in among them) declare a
+  -- The threshold matters: several dB faders (mx_out among them) declare a
   -- 0.1 step too, but that is norns' own "reasonable precision" convention,
   -- not a claim about the click grid - honouring it here rounded a coarse
-  -- click on IN to a tenth of a dB near the middle of its range, where the
-  -- rest of the instrument's magnitude-based grid wants whole decibels.
+  -- click near the middle of its range, where the rest of the instrument's
+  -- magnitude-based grid wants whole decibels.
   if spec.step and spec.step >= 1 then
     local target = util.clamp(v + (d * spec.step), lo, hi)
     params:set(id, util.round(target / spec.step) * spec.step)
@@ -840,6 +858,23 @@ local function snap_to_scale(semi, sc)
     if d < bd then bd, best = d, v end
   end
   return (oct * 12) + best
+end
+
+-- REVERB's SHIFT interval, resolved here rather than in the engine because
+-- SCALE needs the scale table. OCT and 5TH are fixed - 12 and 7 semitones -
+-- and SCALE is NOT an octave snapped to the scale: snap_to_scale(12, sc)
+-- would just return 12 again for almost every scale, since the root is
+-- degree zero and is in the scale by definition, which makes "octave
+-- quantised to scale" a no-op. A fifth is not guaranteed the same way, so
+-- SCALE snaps THAT instead - the scale's own nearest approximation to a
+-- fifth, flat in Locrian, wherever a given mode puts it - which is the one
+-- version of "quantised to scale" that actually depends on the scale.
+local function send_rshift()
+  local m = pval("r_shift_mode")
+  local semi = 12
+  if m == 2 then semi = 7
+  elseif m == 3 then semi = snap_to_scale(7, pval("m_scale")) end
+  engine.rshiftsemi(semi)
 end
 
 -- DELAY's PITCH SPREAD, the second knob on the SPREAD cell. Same shape as
@@ -1341,13 +1376,15 @@ end
 -- The frequency and level of all forty-eight MODAL resonators, and all eight
 -- STRING voices, right now.
 --
--- FREQUENCY is a semitone control in all three modes:
+-- FREQUENCY is a semitone control in all four modes:
 --   GRAINS  the chord the grains are playing tunes the bank, exactly as
 --           before; FREQUENCY is a free transpose ON TOP of that chord.
 --   FREE    one harmonic series off FREQUENCY itself, decoupled from the
 --           grains entirely: stack v takes FREQUENCY x v as its fundamental.
 --   SCALE   the same as FREE, except FREQUENCY is snapped to the nearest
 --           degree of the global scale first.
+--   GRID    `sp_chord` tunes the bank instead - the RESONATOR page's own
+--           per-voice chord, set by the grid exactly like a grainswarm's.
 --
 -- BRIGHTNESS and POSITION replace the old CENTRE/WIDTH/SKEW gain window with
 -- something that has a physical reading: BRIGHTNESS rolls the upper partials
@@ -1373,16 +1410,20 @@ function spettru_layout()
   -- 17 dB down, because the same total power split across widely separated
   -- resonators catches far less of the input) - SCALE just snaps that root
   -- to the scale first.
-  local freeish = mode ~= 1
+  local freeish = mode == 2 or mode == 3
+  local gridish = mode == 4
   local root_semi = freqst
   if mode == 3 then root_semi = snap_to_scale(freqst, sc) end
   local f, a, ad, vf, va = {}, {}, {}, {}, {}
   local sumsq, sumsq_d = 0, 0
   for v = 1, NVOICE do
-    local st = G[v]
+    local st = gridish and sp_chord[v] or G[v]
     local f0
     if freeish then
       f0 = PQ_REF * (2 ^ (root_semi / 12)) * v
+    elseif gridish then
+      local semi = snap_to_scale(st.semi + (OCTAVES[st.oct] * 12), sc)
+      f0 = PQ_REF * (2 ^ ((semi + freqst) / 12))
     else
       local semi = snap_to_scale(
         pval(swid(w, "pitch")) + st.semi + (OCTAVES[st.oct] * 12), sc)
@@ -2137,6 +2178,9 @@ local function add_params()
       if params:get(swid(w, "vspread")) > 0 then distribute(w) end
       send_voices(w)
     end
+    -- REVERB's SHIFT is only affected in SCALE mode, but send_rshift() checks
+    -- that itself - cheaper to always call than to duplicate the check here.
+    send_rshift()
   end)
 
   -- 1/4: a grain per beat. A bar per grain was a texture default; this is
@@ -2486,8 +2530,9 @@ local function add_params()
 
   params:add_separator("spettru", "RESONATOR")
 
-  -- FREQUENCY is a semitone control in all three modes, not a Hz one - it
-  -- reads the same knob whether the bank is locked, free or scale-locked.
+  -- FREQUENCY is a semitone control in all four modes, not a Hz one - it
+  -- reads the same knob whether the bank is locked, free, scale-locked or
+  -- gridded.
   --   GRAINS  the chord the grains are playing, six partials on each of the
   --           eight voices, exactly as before - FREQUENCY becomes a free
   --           transpose ON TOP of the chord rather than sitting unused.
@@ -2497,12 +2542,16 @@ local function add_params()
   --   SCALE   the same as FREE, except FREQUENCY is snapped to the nearest
   --           degree of the global scale first - a quantized root instead
   --           of a continuous one.
+  --   GRID    the bank's OWN chord, `sp_chord`, set by the grid on the
+  --           RESONATOR page exactly like a grainswarm chord - eight voices
+  --           with their own semitone and octave, independent of both
+  --           granulators. FREQUENCY is still a free transpose on top.
   params:add_control("p_freq", "spettru frequency",
     controlspec.new(-48, 48, "lin", 1, 0, "st"))
   params:set_action("p_freq", function() send_bank(true) end)
 
   params:add_option("p_freqmode", "spettru frequency mode",
-    { "GRAINS", "FREE", "SCALE" }, 1)
+    { "GRAINS", "FREE", "SCALE", "GRID" }, 1)
   params:set_action("p_freqmode", function() send_bank(true) end)
 
   -- STRUCTURE stretches the partial series - harmonic at zero, stretched
@@ -2757,9 +2806,27 @@ local function add_params()
   -- Everything here is in dB, with the bottom of each fader a true zero.
   -- The returns reach +12 because a SEND with a quiet return is the whole
   -- reason this page exists.
-  params:add_control("mx_in", "input gain",
-    controlspec.new(-60, 10, "lin", 0.1, 0, "dB"))
-  params:set_action("mx_in", function(x) engine.ingain(dbl(x)) end)
+
+  -- REVERB, ahead of COMP: mixer > REVERB > COMP > the hidden glue >
+  -- limiter. AMOUNT is the one knob a reverb usually needs turned at once -
+  -- wet, size and decay together - so zero is a true bypass and one is a
+  -- huge, long tail, with everything between the two moving as a single
+  -- gesture rather than three.
+  params:add_control("r_verb", "reverb amount",
+    controlspec.new(0, 1, "lin", 0, 0, ""))
+  params:set_action("r_verb", function(x) engine.rverb(x) end)
+
+  -- SHIFT is the shimmer: some of the tail is pitch shifted up and returned
+  -- to the tank, so a held chord grows an ascending ghost instead of only
+  -- decaying - the Valhalla move. MODE picks the interval it climbs by; see
+  -- send_rshift for why SCALE reaches for a fifth rather than an octave.
+  params:add_control("r_shift", "reverb shift",
+    controlspec.new(0, 1, "lin", 0, 0, ""))
+  params:set_action("r_shift", function(x) engine.rshift(x) end)
+
+  params:add_option("r_shift_mode", "reverb shift interval",
+    { "OCT", "5TH", "SCALE" }, 1)
+  params:set_action("r_shift_mode", function() send_rshift() end)
 
   -- POST: the sends hear the GRAINSWARM fader, so pulling it down takes the
   -- effects with it. PRE: they do not, so the tails ring on as the source
@@ -3118,7 +3185,7 @@ end
 local SIDS
 
 local function scene_capture()
-  local sc = { p = {}, g = {}, g2 = {}, t = {} }
+  local sc = { p = {}, g = {}, g2 = {}, g3 = {}, t = {} }
   for _, id in ipairs(SIDS) do sc.p[id] = params:get(id) end
   for i = 1, NVOICE do
     local v = grains[i]
@@ -3130,6 +3197,9 @@ local function scene_capture()
     local u = grains2[i]
     sc.g2[i] = { on = u.on, semi = u.semi, oct = u.oct, lvl = u.lvl,
                  prob = u.prob }
+    -- g3 is RESONATOR's own chord, same reasoning as g2 above.
+    local sp = sp_chord[i]
+    sc.g3[i] = { on = sp.on, semi = sp.semi, oct = sp.oct, lvl = sp.lvl }
   end
 
   -- THE WAVEFORM PICTURE, both granulators.
@@ -3199,6 +3269,10 @@ local function scene_apply(sc)
       v.on, v.semi, v.oct = u.on, u.semi, u.oct
       v.lvl, v.prob = u.lvl or 1, u.prob or 1
     end
+    if sc.g3 and sc.g3[i] then
+      local v, u = sp_chord[i], sc.g3[i]
+      v.on, v.semi, v.oct, v.lvl = u.on, u.semi, u.oct, u.lvl or 1
+    end
   end
   for i = 1, NTAP do
     if sc.t[i] then manual[i].step, manual[i].on = sc.t[i].step, sc.t[i].on end
@@ -3206,6 +3280,7 @@ local function scene_apply(sc)
   scene_apply_wave(sc)
   send_voices()
   send_voices(2)
+  send_bank(true)
   sent.taps = nil
 end
 
@@ -3230,7 +3305,7 @@ end
 local SNAP_N = 120                  -- fifteen columns of eight, the grid exactly
 local SNAP_W = 15
 local SNAP_HOLD = 0.6                 -- how long a hold has to be
-local snap = { sel = 1, last = 0, hold = nil, held_at = 0, clear = false,
+local snap = { sel = 1, last = 0, hold = nil, mod16 = {},
                busy = false, fill = {}, want = {}, pulse = {}, act = nil }
 for i = 1, SNAP_N do
   snap.fill[i], snap.want[i], snap.pulse[i] = 0, 0, 0
@@ -3345,6 +3420,8 @@ local function snap_defaults()
       local v = G[i]
       v.on, v.semi, v.oct, v.lvl, v.prob = (i == 1), 0, 3, 1, 1
     end
+    local sp = sp_chord[i]
+    sp.on, sp.semi, sp.oct, sp.lvl = (i == 1), 0, 3, 1
   end
   for i = 1, NTAP do manual[i].step, manual[i].on = i - 1, (i == 1) end
   send_voices()
@@ -3557,6 +3634,17 @@ function snap_state()
   return snap
 end
 
+-- Column 16 is split top/bottom: rows 1-4 arm SAVE, rows 5-8 arm CLEAR. Either
+-- half is a plain hold - any key in it counts, so a thumb can land on any of
+-- the four rows and it still reads as "that half is down".
+function snap_mods(st)
+  st = st or snap
+  local save_held, clear_held = false, false
+  for row = 1, 4 do if st.mod16[row] then save_held = true end end
+  for row = 5, 8 do if st.mod16[row] then clear_held = true end end
+  return save_held, clear_held
+end
+
 
 -- ---------------------------------------------------------------------------
 -- init
@@ -3623,11 +3711,11 @@ function init()
   send_euclid(2)
   update_timing()
 
-  -- SIGNAL's six box meters. Untested here - the CroneEngine stub the test
+  -- SIGNAL's seven box meters. Untested here - the CroneEngine stub the test
   -- harness uses has addPoll as a no-op - so the callback records that a
   -- value ARRIVED as well as what it was, and the page draws a dash for any
   -- box that has never heard from the engine.
-  for i = 1, 6 do
+  for i = 1, 7 do
     local mp = poll.set("meter" .. i, function(v)
       local lv = util.clamp(v or 0, 0, 4)
       meters[i] = lv
@@ -5598,23 +5686,34 @@ end
 -- ---------------------------------------------------------------------------
 
 -- level per box, 0..1, and whether anything has ever arrived
-meters = { 0, 0, 0, 0, 0, 0 }
-meter_seen = { false, false, false, false, false, false }
+meters = { 0, 0, 0, 0, 0, 0, 0 }
+meter_seen = { false, false, false, false, false, false, false }
 
--- Six boxes. The granulators stack on the left, the chain runs across the
--- middle, and the two rows never share a column - so a wire can always get
--- from one to the other without crossing a box.
+-- Seven boxes now REVERB sits between COLOUR and OUT. The granulators stack
+-- on the left, the chain runs across the middle, and the two rows never
+-- share a column - so a wire can always get from one to the other without
+-- crossing a box. The five chain boxes moved from a spacing of 22 to 20 (and
+-- their block shifted 14 px left) to make room for the new one; OUT lands
+-- back on its old x by construction, which is why only it looks untouched.
+--
+-- REVERB has no FEED of its own - see HAL_FEED below - so it is a plain
+-- spine box, the same as DELAY or COLOUR would be without their per-stage
+-- DRY IN.
 local HAL_BOX = {
   { n = "GR1", x = 0,  row = -1, m = 1 },
   { n = "GR2", x = 0,  row =  1, m = 2 },
-  { n = "RES", x = 42, row =  0, m = 3 },
-  { n = "DLY", x = 64, row =  0, m = 4 },
-  { n = "COL", x = 86, row =  0, m = 5 },
-  { n = "OUT", x = 108, row = 0, m = 6 },
+  { n = "RES", x = 28, row =  0, m = 3 },
+  { n = "DLY", x = 48, row =  0, m = 4 },
+  { n = "COL", x = 68, row =  0, m = 5 },
+  { n = "RVB", x = 88, row =  0, m = 6 },
+  { n = "OUT", x = 108, row = 0, m = 7 },
 }
 
+-- REVERB is not a granulator entry point - it has no DRY IN of its own, and
+-- a granulator can only reach it by flowing through COLOUR - so box 6 has no
+-- entry here on purpose.
 local HAL_FEED = { [3] = { "p_in1", "p_in2" }, [4] = { "s_in1", "s_in2" },
-                   [5] = { "k_in1", "k_in2" }, [6] = { "o_in1", "o_in2" } }
+                   [5] = { "k_in1", "k_in2" }, [7] = { "o_in1", "o_in2" } }
 
 local HAL_BW, HAL_BH = 18, 11
 
@@ -5713,7 +5812,7 @@ function draw_hallat()
   -- the spine first, dim and continuous: it is always there and it is the
   -- thing the animated wires join
   screen.level(2)
-  for i = 3, 5 do
+  for i = 3, 6 do
     local ax, ay = hal_xy(HAL_BOX[i])
     local bx, by = hal_xy(HAL_BOX[i + 1])
     screen.move(ax + HAL_BW, ay + (HAL_BH / 2))
@@ -5773,7 +5872,7 @@ function draw_hallat()
     -- The output box IS its readout. "OUT" is the rightmost box on a chain
     -- that reads left to right, so its position already says which one it is,
     -- and the one thing you want from it is the number.
-    if b.m == 6 then
+    if b.m == 7 then
       screen.text(seen and hal_db(lv) or "--")
     else
       screen.text(b.n)
@@ -6263,9 +6362,10 @@ function redraw()
     mid, midlevel = string.format("CPU %d", math.floor(cpu)), 15
   elseif pg.kind == "ritratt" then
     local st = snap_state()
-    mid = st.clear and "CLEAR"
+    local save_held, clear_held = snap_mods(st)
+    mid = (save_held and "SAVE") or (clear_held and "CLEAR")
       or (snap_occupied(st.sel) and "SAVED" or "NEW")
-    midlevel = st.clear and 15 or 5
+    midlevel = (save_held or clear_held) and 15 or 5
   elseif c and c.mode then
     mid, midlevel = params:string(c.mode), 6
   elseif c and c.alt and not c.dual then
@@ -6458,38 +6558,76 @@ function g.key(x, y, z)
     end
     sent.taps = nil
   elseif kind == "ritratt" or kind == "pappus" then
-    -- Fifteen columns of slots and a sixteenth column of CLEAR keys. Hold a
-    -- clear key and the grid becomes destructive for as long as you hold it,
-    -- which is the only reason a hundred and twenty one-tap slots are safe to
-    -- have: you cannot wipe one by accident with the same gesture that loads
-    -- it.
+    -- Fifteen columns of slots and a sixteenth column split top/bottom: the
+    -- top four rows arm SAVE, the bottom four arm CLEAR. Neither does
+    -- anything on its own - it is a modifier, held in one hand while the
+    -- other holds down a slot.
+    --
+    -- With a modifier down, a slot press is still a HOLD, not a tap: the
+    -- square fills (or drains) with the finger exactly as it always did, and
+    -- letting go before it completes backs out with nothing changed. The
+    -- only thing that moved is which gesture arms which mode - it used to be
+    -- one CLEAR key that flipped the same hold between save and clear; now
+    -- it is which half of column 16 is under the other hand.
+    --
+    -- With NEITHER modifier down, a slot press is a plain, immediate load -
+    -- there is nothing destructive about loading, so it needs no hold and no
+    -- chance to back out.
     --
     -- PAPPUS reaches this branch too: it is SNAPSHOTS' own state under a
     -- different screen, not a different page of grid behaviour.
     local st = snap_state()
     local nc = cols()
     if nc >= 16 and x == 16 then
-      st.clear = (z == 1)
-      st.hold = nil
+      st.mod16[y] = (z == 1)
       return
     end
     local i = ((y - 1) * SNAP_W) + x
     if i < 1 or i > SNAP_N then return end
-    st.sel = i
     if z == 1 then
-      -- The hold starts NOW and you watch it happen. Which hold it is depends
-      -- on the CLEAR key: armed, the square drains; otherwise it fills.
-      st.hold = i
-      snap_hold_start(i, st.clear and "clear" or "save")
-    elseif st.hold == i then
-      st.hold = nil
-      -- completed while held, so the release has nothing left to do; let go
-      -- early and it was a tap, which loads
-      if not snap_hold_end() then
+      st.sel = i
+      local save_held, clear_held = snap_mods(st)
+      if save_held or clear_held then
+        -- The hold starts NOW and you watch it happen.
+        st.hold = i
+        snap_hold_start(i, save_held and "save" or "clear")
+      else
         snap_recall(i)
         snap_pulse(i)
       end
+    elseif st.hold == i then
+      st.hold = nil
+      -- released early: the animation eases back on its own and nothing
+      -- committed. No fallback to a load here - a modifier was down, so the
+      -- intent was never ambiguous the way a bare tap is.
+      snap_hold_end()
     end
+  elseif kind == "spettru" then
+    -- RESONATOR's own chord: row = voice, x1-12 semitone, x13-16 octave -
+    -- the same gesture as a grainswarm's grid, but writing into `sp_chord`
+    -- rather than either granulator's, so it only ever moves the bank.
+    local st = sp_chord[y]
+    local n = cols()
+    if n >= 16 then
+      if x <= 12 then
+        if st.on and st.semi == (x - 1) then
+          st.on = false
+        else
+          st.semi = x - 1
+          st.on = true
+        end
+      else
+        st.oct = util.clamp(x - 12, 1, #OCTAVES)
+      end
+    else
+      if st.on and st.semi == (x - 1) then
+        st.on = false
+      else
+        st.semi = util.clamp(x - 1, 0, 11)
+        st.on = true
+      end
+    end
+    send_bank(true)
   else
     -- COLOUR, MODNI and SIGNAL: row = cell, x sets its value
     local cell = cell_at(PAGES[page], y)
@@ -6551,6 +6689,7 @@ function grid_redraw()
   elseif kind == "ritratt" or kind == "pappus" then
     -- same slot grid PAPPUS's norns screen does not show
     local st = snap_state()
+    local save_held, clear_held = snap_mods(st)
     for y = 1, NVOICE do
       for x = 1, math.min(SNAP_W, nn) do
         local i = ((y - 1) * SNAP_W) + x
@@ -6559,7 +6698,27 @@ function grid_redraw()
         if i == st.sel then lv = math.max(lv, 4) end
         g:led(x, y, lv)
       end
-      if nn >= 16 then g:led(16, y, st.clear and 15 or 3) end
+      if nn >= 16 then
+        -- top half is SAVE, bottom half is CLEAR, so the split reads at a
+        -- glance even before anything is held
+        local armed = (y <= 4) and save_held or clear_held
+        g:led(16, y, armed and 15 or ((y <= 4) and 4 or 2))
+      end
+    end
+  elseif kind == "spettru" then
+    for row = 1, NVOICE do
+      local st = sp_chord[row]
+      local semis = math.min(12, nn)
+      for x = 1, semis do
+        local lv = BLACK[x - 1] and 1 or 3
+        if st.semi == (x - 1) then lv = st.on and 15 or 6 end
+        g:led(x, row, lv)
+      end
+      if nn >= 16 then
+        for i = 1, #OCTAVES do
+          g:led(12 + i, row, (st.oct == i) and (st.on and 12 or 5) or 2)
+        end
+      end
     end
   else
     for i = 1, math.min(#PAGES[page].cells, 8) do

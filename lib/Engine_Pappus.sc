@@ -1,8 +1,8 @@
 // Engine_Pappus
 // Pappus - scatter to the wind. A chain of Torso S-4 style devices:
 //
-//   GRAINSWARM 1 and 2 (parallel) > RESONATOR > DELAY > COLOUR > out,
-//   where SIGNAL is the routing: each stage has an amount of each
+//   GRAINSWARM 1 and 2 (parallel) > RESONATOR > DELAY > COLOUR > REVERB >
+//   out, where SIGNAL is the routing: each stage has an amount of each
 //   granulator fed into it, so either one can skip any part of the chain
 //
 // GRAINSWARM continuously captures the input into a mono ring buffer and spawns
@@ -116,12 +116,13 @@ Engine_Pappus : CroneEngine {
 		envbufs = (0..16).collect { Buffer.alloc(srv, 256, 1) };
 		patbuf = Buffer.alloc(srv, patvals.size, 1);
 		patbuf2 = Buffer.alloc(srv, patvals.size, 1);
-		// SIX METERS, on a control bus. SIGNAL draws the signal flow with a
+		// SEVEN METERS, on a control bus. SIGNAL draws the signal flow with a
 		// live level on every box, and a level Lua guessed at would be a
 		// drawing of something nobody measured.
 		//   1 GRAINSWARM 1   2 GRAINSWARM 2   3 RESONATOR
-		//   4 DELAY        5 COLOUR         6 OUT
-		mbus = Bus.control(srv, 6);
+		//   4 DELAY        5 COLOUR         6 REVERB
+		//   7 OUT
+		mbus = Bus.control(srv, 7);
 		srv.sync;
 
 		envbufs.do { arg b, i;
@@ -244,6 +245,11 @@ Engine_Pappus : CroneEngine {
 				sin1 = 0, sin2 = 0,            // into DELAY
 				kin1 = 0, kin2 = 0,            // into COLOUR
 				oin1 = 0, oin2 = 0,            // straight to the output
+				// REVERB, ahead of COMP. rverb walks wet, size and decay
+				// together; rshift is the shimmer send, and rshiftsemi is the
+				// interval it climbs by, resolved in Lua (OCT/5TH/SCALE) and
+				// sent as a plain semitone count.
+				rverb = 0, rshift = 0, rshiftsemi = 12,
 				ingain = 1, mcomp = 0.2, limceil = 0.98855,
 				bypass = 0, amp = 1, fade = 1, run = 1;
 
@@ -254,19 +260,21 @@ Engine_Pappus : CroneEngine {
 			var fmodal, fstring, mfade;
 			var svfrq, svamp, sdec, sdet, spos;
 			var pin, kin, omix, mcp;
+			var ramt, rsize, rdecay, rdamp, rin, rmono, rtankc, rwet, rratio,
+				rshifted, shimmerfb, shimmerout, rsend, rkeep, rout;
 			var fsum, fmix, fsend, fwt;
 			var presig, sfeed;
 			var dframes, dph, fbtime, fbrd, fblo, fbhi, fbcol, fbamt, dwrite;
 			var tphases, taps, wetsig, sdry, smix, ssend, ssig, stl, sxo;
 			var dry, sig, env;
-			var dr, cr, ls, ns, kw, kwd, kwm;
+			var dr, cr, ls, ns, kw, kwd, kwf, kwm;
 			var dgain, dbias, dx, dy, mk;
 			var bits, q, fb, pre, bc, jit, sr, rd, br, crushed, crushfb, kout;
 			var lmono, lchain, lthr, lossmono, ldry, lossed, lmix;
 			var lo, hi, nwhite, npink, ndust, nwash, nz;
 			var nlp, nloopsel, nlooprate, nloop;
 			var mixed, sent, outsig;
-			var mt1, mt2, mt3, mt4, mt5, mt6;
+			var mt1, mt2, mt3, mt4, mt5, mt6, mt7;
 
 			// =============================================================
 			// INPUT
@@ -295,20 +303,23 @@ Engine_Pappus : CroneEngine {
 			// The engine already owns the single LocalIn/LocalOut pair a
 			// SynthDef is allowed, down in COLOUR's crush. One LocalIn/
 			// LocalOut pair is all a SynthDef gets, so this one carries
-			// everything that has to cross a block boundary - which today is
-			// just COLOUR's two crush error feedback channels. RESONATOR used
-			// to carry a third channel here for its own FEEDBACK control;
+			// everything that has to cross a block boundary - COLOUR's two
+			// crush error feedback channels, plus a third for REVERB's
+			// shimmer regeneration (see the note by LocalOut, at the true end
+			// of the graph now that a second stage needs the bus). RESONATOR
+			// used to carry a channel here too, for its own FEEDBACK control;
 			// Rings has no such knob, and DAMPING alone gets a bank or a
 			// string close enough to self-sustaining without regenerating
-			// through a block-delayed loop, so the channel is gone with it.
+			// through a block-delayed loop, so that one stayed gone.
 			//
 			// Reading a value one block late - about 1.3 ms at 48 kHz, under
 			// half a metre of air - is what a stage-to-stage feedback hop
 			// costs here, whichever direction it goes: an SC graph is acyclic
 			// and evaluated in a fixed order, so nothing can read something
 			// computed after it within the same block.
-			plfb = LocalIn.ar(2);
+			plfb = LocalIn.ar(3);
 			fb = plfb[0..1];
+			shimmerfb = plfb[2];
 
 			// fixed detune table, in octaves. A table rather than a random UGen
 			// so anything using it is stable and repeatable.
@@ -1238,31 +1249,124 @@ Engine_Pappus : CroneEngine {
 			// Cubic depth: the bottom two thirds of the knob is the slow
 			// unsteadiness that makes digital sound less rigid, and only the
 			// top goes properly seasick. A linear knob would have spent its
-			// whole travel on either one or the other.
+			// whole travel on either one or the other. The coefficient is bigger
+			// than the strictly-safe minimum on purpose, so the top of the knob
+			// reaches a properly warped-tape wobble instead of a gentle waver.
+			//
+			// FLUTTER rides on top: a faster (4-6 Hz) LFNoise2 whose own depth
+			// is quartic in the knob, so it stays inaudible until the last
+			// quarter of travel and then comes in fast - the way a worn cassette
+			// starts to visibly quiver once you push it. Wow and flutter
+			// together are what reads as tape; either alone just reads as
+			// detune.
 			//
 			// The base delay tracks the depth so a WOW of zero costs half a
 			// millisecond rather than twelve. Moving the knob therefore glides
 			// the pitch, which is what a tape machine does when you lean on it.
-			kwd = ((kw * 0.0012) + ((kw ** 3) * 0.010));
-			kwm = LFNoise2.kr([0.08 + (kw * 0.5), 0.067 + (kw * 0.41)]) * kwd;
-			outsig = DelayC.ar(outsig, 0.05,
+			kwd = ((kw * 0.0012) + ((kw ** 3) * 0.026));
+			kwf = (kw ** 4) * 0.006;
+			kwm = (LFNoise2.kr([0.08 + (kw * 0.7), 0.067 + (kw * 0.55)]) * kwd)
+				+ (LFNoise2.kr([4.7, 6.1]) * kwf);
+			// Buffer widened from 0.05 to 0.08 to cover the new worst case
+			// (base + wow's own swing + flutter, all at kw = 1) with headroom.
+			outsig = DelayC.ar(outsig, 0.08,
 				Lag.kr(0.0005 + kwd, 0.3) + kwm);
 			kout = [
 				Select.ar(bypass, [outsig[0], in[0]]),
 				Select.ar(bypass, [outsig[1], in[1]])
 			];
+			mt5 = Amplitude.kr((kout[0] + kout[1]) * 0.5, 0.01, 0.2);
+
+			// =============================================================
+			// REVERB - a shimmer tank, ahead of COMP
+			// =============================================================
+			// Two knobs, on purpose no more. AMOUNT walks wet, size and decay
+			// together: turning a reverb up usually means "more of all
+			// three" at once, not three separate decisions, and AMOUNT at
+			// zero has to be a silent bypass rather than a small dry room
+			// nobody asked for - which the wet crossfade below guarantees on
+			// its own, since size and decay only matter once something is
+			// audibly wet. SHIFT is the Valhalla move: some of the tank's own
+			// tail is pitch shifted and handed back to the tank's input, so a
+			// held chord keeps climbing instead of only decaying. At zero it
+			// is an ordinary tail.
+			ramt = Lag.kr(rverb, lagt).clip(0, 1);
+			rsize = 1 + (ramt * 2);
+			rdecay = 0.3 + (ramt.pow(1.6) * 11.7);
+			// One shared lowpass stands in for per-comb damping: a true FDN
+			// darkens EACH repeat, this only darkens the sum, but it costs a
+			// sixth of the filters and still gives a big tank the dull tail a
+			// small one does not, which is the part that reads as "size".
+			rdamp = 11000 - (ramt * 8000);
+
+			// SHIFT's interval is resolved in Lua, not here - OCT and 5TH are
+			// fixed semitone counts, and SCALE is the current scale's own
+			// nearest degree to a fifth (an octave snaps to itself in every
+			// scale on this instrument, since the root is always degree
+			// zero - that is why SHIFT reaches for a fifth rather than an
+			// octave when it wants the scale to matter). Whatever Lua decided
+			// arrives here as a plain semitone count, same convention as
+			// DELAY's PITCH SPREAD.
+			rratio = 2 ** (Lag.kr(rshiftsemi, lagt) / 12);
+
+			rmono = (kout[0] + kout[1]) * 0.5;
+			rin = rmono + shimmerfb;
+
+			// Six damped combs, three per channel so the two sides read
+			// different taps of the same tank rather than both echoing the
+			// same one - mutually prime-ish base lengths, so the bank does
+			// not ring on one pitch, each stretched by SIZE.
+			rtankc = [[0.0297, 0.0411, 0.0532], [0.0371, 0.0437, 0.0613]]
+				.collect({ arg lens;
+					var s = DC.ar(0);
+					lens.do({ arg len;
+						s = s + CombL.ar(rin, 0.2, (len * rsize).min(0.19), rdecay);
+					});
+					LPF.ar(s * 0.5, rdamp);
+				});
+
+			// Dattorro-style output diffusion, the same shape as DELAY's
+			// DIFFUSE - four allpasses per channel at mutually prime times,
+			// offset between the two channels to keep the stereo image from
+			// collapsing back to mono.
+			rwet = rtankc.collect({ arg x, c;
+				var sp = 1 + (c * 0.19);
+				[0.0149, 0.0223, 0.0307, 0.0389].do({ arg dt;
+					x = AllpassC.ar(x, 0.16, (dt * sp * rsize).min(0.155),
+						dt * sp * rsize * 11);
+				});
+				x;
+			});
+
+			// The shimmer send itself: pitch shift the tank's own wet tail
+			// and give a slice of it back, one block later. That block of
+			// latency is what closes the loop - see the LocalIn/LocalOut
+			// note above - and the loop is what makes the shimmer climb
+			// rather than just ring at a fixed interval once and decay.
+			rshifted = PitchShift.ar((rwet[0] + rwet[1]) * 0.5, 0.15, rratio,
+				0, 0.008);
+			shimmerout = (rshifted * Lag.kr(rshift, lagt).clip(0, 1) * 0.9)
+				.clip2(1.3);
+
+			// Same two-gain trick as RESONATOR and DELAY: an equal-power
+			// crossfade on the ONE knob that is also driving size and decay,
+			// so AMOUNT at zero really is COLOUR's output, untouched.
+			rsend = (ramt * 0.5pi).sin;
+			rkeep = (ramt * 0.5pi).cos;
+			rout = (kout * rkeep) + (rwet * rsend);
+			mt6 = Amplitude.kr((rout[0] + rout[1]) * 0.5, 0.01, 0.2);
 
 			// Everything that has to cross a block boundary, written once - a
 			// SynthDef gets one LocalOut and it has to sit here, after the
-			// last thing that reads from it exists.
-			LocalOut.ar(crushfb);
+			// last thing that reads from it exists, which is now REVERB's
+			// shimmer send rather than COLOUR's crush.
+			LocalOut.ar(crushfb ++ [shimmerout]);
 
 			// ---- THE MIX ----
-			// COLOUR's output plus anything routed straight past everything.
+			// REVERB's output plus anything routed straight past everything.
 			// This is SIGNAL: there is no mixer stage of its own, because a
 			// mixer whose faders are all somewhere else is just a sum.
-			mt5 = Amplitude.kr((kout[0] + kout[1]) * 0.5, 0.01, 0.2);
-			omix = kout + gfeed.value(oin1, oin2);
+			omix = rout + gfeed.value(oin1, oin2);
 
 			// ---- COMP, the one master control ----
 			// Moved here from COLOUR, where it was compressing the colour
@@ -1322,8 +1426,8 @@ Engine_Pappus : CroneEngine {
 			outsig = LeakDC.ar(outsig) * Lag.kr(amp, 0.05) * Lag.kr(fade, 0.06);
 			outsig = Limiter.ar(outsig,
 				Lag.kr(limceil, 0.1).clip(0.03, 1.0), 0.01);
-			mt6 = Amplitude.kr((outsig[0] + outsig[1]) * 0.5, 0.01, 0.2);
-			Out.kr(mbus, [mt1, mt2, mt3, mt4, mt5, mt6]);
+			mt7 = Amplitude.kr((outsig[0] + outsig[1]) * 0.5, 0.01, 0.2);
+			Out.kr(mbus, [mt1, mt2, mt3, mt4, mt5, mt6, mt7]);
 			Out.ar(outbus, outsig);
 		}).add;
 
@@ -1429,6 +1533,11 @@ Engine_Pappus : CroneEngine {
 		// ---- the INPUT selectors, and COLOUR WOW ----
 		this.addCommand("kwow", "f", { arg msg; synth.set(\kwow, msg[1]); });
 
+		// ---- REVERB ----
+		this.addCommand("rverb", "f", { arg msg; synth.set(\rverb, msg[1]); });
+		this.addCommand("rshift", "f", { arg msg; synth.set(\rshift, msg[1]); });
+		this.addCommand("rshiftsemi", "f", { arg msg; synth.set(\rshiftsemi, msg[1]); });
+
 		// ---- THE ROUTING ----
 		// Two per stage: how much of each granulator is fed in there.
 		// This is the whole mixer - there are no module faders any more.
@@ -1446,7 +1555,7 @@ Engine_Pappus : CroneEngine {
 		this.addCommand("fade", "f", { arg msg; synth.set(\fade, msg[1]); });
 		this.addCommand("run", "i", { arg msg; synth.set(\run, msg[1]); });
 
-		// SIX POLLS, one per box on SIGNAL's wireframe.
+		// SEVEN POLLS, one per box on SIGNAL's wireframe.
 		//
 		// getnSynchronous reads the control bus through the server's shared
 		// memory rather than asking for it over OSC and waiting, which is what
@@ -1457,9 +1566,9 @@ Engine_Pappus : CroneEngine {
 		// once fired in a test. The Lua side is written to notice: a meter that
 		// has never received a value draws a dash, not a zero, so a failure on
 		// hardware reads as "no data" instead of as "this module is silent".
-		6.do { arg i;
+		7.do { arg i;
 			this.addPoll(("meter" ++ (i + 1)).asSymbol, {
-				mbus.getnSynchronous(6)[i];
+				mbus.getnSynchronous(7)[i];
 			});
 		};
 		// wipe the capture buffer - a new project starts on silence, not on

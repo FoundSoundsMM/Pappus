@@ -120,7 +120,6 @@ step("extreme params", function()
                         "p_pos", "p_grain", "p_wet",
                         "lfo1_rate", "lfo1_phase", "lfo1_a1",
                         "lfo8_rate", "lfo8_phase", "lfo8_a1",
-                        "mx_in",
                         "mx_limit", "mx_out",
                         "env_atk", "env_rel", "env_sens", "env_a1", "env_a2",
                         "noise_dyn", "noise_decay" }) do
@@ -282,21 +281,17 @@ step("all lfo shapes", function()
   params:set("lfo2_d1", 1); params:set("lfo2_a1", 0)
 end)
 
--- SIGNAL is the routing now, not a mixer. Two claims: the input and output
--- faders still reach a TRUE zero rather than -60 dB of residue, and every
--- routing feed reaches both ends of its own range - a feed that cannot reach
--- zero cannot bypass a module, which is the entire point of the page.
-step("routing feeds and the two remaining faders", function()
+-- SIGNAL is the routing now, not a mixer. Two claims: the output fader still
+-- reaches a TRUE zero rather than -60 dB of residue, and every routing feed
+-- reaches both ends of its own range - a feed that cannot reach zero cannot
+-- bypass a module, which is the entire point of the page.
+step("routing feeds and the remaining fader", function()
   clear_toggles()
-  for _, id in ipairs({ "mx_in", "mx_out" }) do
-    params:set(id, -60)
-    tick(1, 0.1)
-  end
-  assert(mock.calls.last.ingain[1] == 0, "input gain floor is not silent")
-  assert(mock.calls.last.amp[1] == 0, "output floor is not silent")
-  for _, id in ipairs({ "mx_in", "mx_out" }) do params:set(id, 0) end
+  params:set("mx_out", -60)
   tick(1, 0.1)
-  assert(math.abs(mock.calls.last.ingain[1] - 1) < 1e-9, "0 dB is not unity")
+  assert(mock.calls.last.amp[1] == 0, "output floor is not silent")
+  params:set("mx_out", 0)
+  tick(1, 0.1)
 
   for pid, cmd in pairs({ p_in1 = "pin1", p_in2 = "pin2",
                           s_in1 = "sin1", s_in2 = "sin2",
