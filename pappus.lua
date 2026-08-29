@@ -823,14 +823,38 @@ local function snap_to_scale(semi, sc)
 end
 
 -- DELAY's PITCH SPREAD, the second knob on the SPREAD cell. Same shape as
--- PAN_BASE: a fixed value per tap SLOT, not per step, so it is a property of
--- the tap the way the pan is, and does not reshuffle when EUCLID or the grid
--- changes which slots are on. OCT & 5TH snaps that same ramp to the nearest
+-- PAN_BASE: a value per tap SLOT, not per step, so it is a property of the
+-- tap the way the pan is, and does not reshuffle when EUCLID or the grid
+-- changes which slots are on. OCT+5TH snaps that same ramp to the nearest
 -- octave-or-fifth; SCALE snaps it to the master scale instead of the tap's
 -- own semitones, reusing snap_to_scale exactly as GRAINSWARM's V.SPRD does.
+--
+-- The RANGE the taps ramp across is not fixed - it grows with the SPREAD
+-- knob itself, the same knob that sets the pan spread, so "no spread" really
+-- means no spread. Two breakpoint tables, one per edge, walked and
+-- interpolated independently: TOP climbs 0 -> 1 -> 2 -> 3 octaves over the
+-- knob's first three quarters then holds; BOTTOM stays put at 0 until the
+-- knob passes halfway, then drops to -1 and holds. That is what gives an
+-- asymmetric span once the knob is most of the way up, rather than a
+-- symmetric one that would blow the top octave out early.
 local PSPREAD_IV = { -12, -7, 0, 7, 12 }
-local function pspread_base(i)
-  return -12 + ((i - 1) * (24 / (NTAP - 1)))
+local PSPREAD_TOP = { { 0, 0 }, { 0.25, 1 }, { 0.5, 2 }, { 0.75, 3 }, { 1, 3 } }
+local PSPREAD_BOT = { { 0, 0 }, { 0.25, 0 }, { 0.5, -1 }, { 0.75, -1 }, { 1, -1 } }
+local function pspread_edge(v, tbl)
+  v = util.clamp(v, 0, 1)
+  for k = 1, #tbl - 1 do
+    local a, b = tbl[k], tbl[k + 1]
+    if v <= b[1] then
+      local f = (b[1] > a[1]) and ((v - a[1]) / (b[1] - a[1])) or 0
+      return a[2] + (f * (b[2] - a[2]))
+    end
+  end
+  return tbl[#tbl][2]
+end
+local function pspread_base(i, spread)
+  local lo = pspread_edge(spread, PSPREAD_BOT) * 12
+  local hi = pspread_edge(spread, PSPREAD_TOP) * 12
+  return lo + ((i - 1) * (hi - lo) / (NTAP - 1))
 end
 local function snap_to_set(semi, set)
   local best, bd = set[1], 999
@@ -1601,11 +1625,11 @@ local function update_timing()
     if pspread == 1 then
       t.pitch = 0
     elseif pspread == 2 then
-      t.pitch = pspread_base(i)
+      t.pitch = pspread_base(i, spread)
     elseif pspread == 3 then
-      t.pitch = snap_to_set(pspread_base(i), PSPREAD_IV)
+      t.pitch = snap_to_set(pspread_base(i, spread), PSPREAD_IV)
     else
-      t.pitch = snap_to_scale(util.round(pspread_base(i)), mscale)
+      t.pitch = snap_to_scale(util.round(pspread_base(i, spread)), mscale)
     end
     sig[i] = string.format("%d%d%.2f%.2f", t.step, t.on and 1 or 0, t.lvl, t.pitch)
   end
