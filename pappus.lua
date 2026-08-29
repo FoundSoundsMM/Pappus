@@ -775,6 +775,26 @@ local function bump(id, d, fine)
 
   local lo, hi = spec.minval, spec.maxval
   local v = params:get(id)
+
+  -- A spec that declares its own STEP OF AT LEAST ONE - so far, only the
+  -- semitone pitch controls - is a fixed grid, not a continuous range that
+  -- happens to be round right now. Running it through the magnitude-based
+  -- quantum() below gave PITCH a hundredth-of-a-semitone grid near zero: a
+  -- click did almost nothing, which read as unresponsive, and left decimals
+  -- in the display. There is no finer-than-a-semitone to type, so fine and
+  -- coarse match.
+  --
+  -- The threshold matters: several dB faders (mx_in among them) declare a
+  -- 0.1 step too, but that is norns' own "reasonable precision" convention,
+  -- not a claim about the click grid - honouring it here rounded a coarse
+  -- click on IN to a tenth of a dB near the middle of its range, where the
+  -- rest of the instrument's magnitude-based grid wants whole decibels.
+  if spec.step and spec.step >= 1 then
+    local target = util.clamp(v + (d * spec.step), lo, hi)
+    params:set(id, util.round(target / spec.step) * spec.step)
+    return
+  end
+
   local q = quantum(v, hi - lo)
 
   local target
@@ -2394,12 +2414,18 @@ local function add_params()
   -- "70%" means to anybody. Enter once, flow through, and use the later feeds
   -- to move where a granulator JOINS rather than to add copies of it.
 
+  -- RESONATOR's own DRY IN reaches above unity - +5 dB of headroom past 100%,
+  -- so a granulator can be made to drive the bank harder than it plays back,
+  -- the way a real exciter overdriving a body would. Nothing else's DRY IN
+  -- does this: it is the one feed that goes into a resonant, potentially
+  -- self-sustaining system rather than a straight pass-through, so "louder
+  -- than the source" is a legitimate thing to ask of it.
   params:add_control("p_in1", "spettru in: grainswarm 1",
-    controlspec.new(0, 1, "lin", 0, 0.7, ""))
+    controlspec.new(0, dbl(5), "lin", 0, 0.7, ""))
   params:set_action("p_in1", function(x) engine.pin1(x) end)
 
   params:add_control("p_in2", "spettru in: grainswarm 2",
-    controlspec.new(0, 1, "lin", 0, 0.7, ""))
+    controlspec.new(0, dbl(5), "lin", 0, 0.7, ""))
   params:set_action("p_in2", function(x) engine.pin2(x) end)
 
   params:add_control("s_in1", "delay in: grainswarm 1",
@@ -2440,7 +2466,7 @@ local function add_params()
   --           degree of the global scale first - a quantized root instead
   --           of a continuous one.
   params:add_control("p_freq", "spettru frequency",
-    controlspec.new(-48, 48, "lin", 0, 0, "st"))
+    controlspec.new(-48, 48, "lin", 1, 0, "st"))
   params:set_action("p_freq", function() send_bank(true) end)
 
   params:add_option("p_freqmode", "spettru frequency mode",
@@ -6092,6 +6118,18 @@ function redraw()
     else
       value = string.format("%.2fHz", grain_hz(2))
     end
+  elseif c.id == "p_in1" then
+    -- RESONATOR's DRY IN alone reaches above unity - see the params comment
+    -- on why. Percent up to 100, same as every other DRY IN; past it the
+    -- number switches to dB of boost, which is what "over 100%" actually
+    -- means and reads unambiguously rather than as a number nobody can
+    -- place against 0 dB.
+    local function inpct(id)
+      local x = pval(id)
+      if x <= 1.0 then return string.format("%d", math.floor(x * 100 + 0.5)) end
+      return string.format("+%.1fdB", 20 * math.log(x, 10))
+    end
+    value = string.format("GS1 %s / GS2 %s", inpct(c.id), inpct(c.alt))
   elseif c.dual then
     -- Both halves, NAMED. The cell shows two bars and the header used to show
     -- "70 / 70", which says there are two of something without saying which
@@ -6143,6 +6181,10 @@ function redraw()
       local r = euclid_rot(w)
       value = (r == 0) and "ALIGN" or string.format("ROT %d", r)
     end
+  elseif c.id == "m_pitch" or c.id == "n_pitch" or c.id == "p_freq" then
+    -- whole semitones only - params:string()'s default "%.2f st" is decimals
+    -- for a grid that bump() now only ever lands on integers of.
+    value = string.format("%+d st", params:get(c.id))
   elseif c.id == "m_euclid" or c.id == "n_euclid" then
     local k, n = euclid_kn(pg.sw or 1)
     value = (k == 0) and "OFF" or string.format("%d/%d", k, n)
