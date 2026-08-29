@@ -7,9 +7,6 @@ colour + scene morphing, with modular routing and modulation.
 
 A very deep sound design tool and soundscape instrument.
 
-**SRC picks each grainswarmer's input and starts OFF**, so select an input to
-hear something. **SOS at max freezes the buffer.**
-
 ```
 K2 back                  K3 forward
 K2 & K3                  change lane
@@ -23,7 +20,7 @@ Grid compatible (see below).
 
 Designed by Michael Manning. Inspired by Torso S-4.
 
-Heavy LLM usage. 100% Claude code.
+Heavy LLM usage disclaimer. 100% Claude code.
 
 ---
 
@@ -99,26 +96,16 @@ if it were a waveform. So **SRC** is:
 ```
 STEREO     left to the left buffer, right to the right, kept apart
 MONO L     the left input, written to BOTH buffers
+```
+```
+STEREO     left to the left buffer, right to the right, kept apart
+MONO L     the left input, written to BOTH buffers
 MONO R     the right input, written to both
 ```
 
 A mono source is not "stereo with one side missing": it goes to both sides so
 the grains arrive centred rather than stacked against one speaker. STEREO with
 a lead in one socket really is one-sided, which is what stereo means.
-
-The cost is one extra interpolated buffer read per voice: the **main** grain is
-read twice, once per side, and balanced by SPRAY rather than panned. The
-**SWARM duplicates are free** — there were always two of them, so one is
-pointed at each side, and the pair costs exactly what it did before while
-carrying both. With a mono source both buffers hold the same samples and every
-level in the instrument comes out where it always did.
-
-Measured through the whole grain engine: a 300 Hz tone in the left input and a
-3 kHz tone in the right come out 76 dB low-heavy on the left and 61 dB
-high-heavy on the right (`test/src_test.py`).
-
-**MODNI ENV** has its own **SRC** cell, and it is a follower rather than a
-capture, so it sums where the granulators keep apart:
 
 ```
 OUT        the master output, after everything (the default)
@@ -127,14 +114,6 @@ IN L+R     both inputs, averaged
 LEFT       the left input only
 RIGHT      the right input only
 ```
-
-OUT is right for ducking something against the whole chain; the input sources
-are what you want for playing something in, since an envelope taken from the
-output of a chain that is already reacting to the input is a feedback loop
-with a delay in it.
-
-with MODNI modulating and SNAPSHOTS storing all of it.
-
 ## controls
 
 - **K2** back a page, **K3** forward, within the current lane. **Long K2** puts the selected parameter back to its default and takes any modulator off it.
