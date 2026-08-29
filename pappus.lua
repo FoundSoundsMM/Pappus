@@ -4508,13 +4508,19 @@ function draw_waveform()
     -- SOS at max freezes the buffer, so the trace stops meaning anything -
     -- it is the same picture forever until K3 lets go. Say that in words
     -- instead of drawing a frozen waveform that looks like a live one.
+    -- norns' screen has no text_center - centering by hand with
+    -- text_extents. A missing function here throws on every redraw while
+    -- locked, which kills the redraw callback for good: the screen freezes
+    -- on "LOCKED" and never comes back even after K3 unlocks it.
     local midx = SWB_W + 2 + ((WAVE_N - SWB_W - 2) / 2)
+    local l1 = "LOCKED"
     screen.level(15)
-    screen.move(midx, cy - 2)
-    screen.text_center("LOCKED")
+    screen.move(midx - (screen.text_extents(l1) / 2), cy - 2)
+    screen.text(l1)
+    local l2 = "HOLD K3 TO UNLOCK"
     screen.level(4)
-    screen.move(midx, cy + 7)
-    screen.text_center("HOLD K3 TO UNLOCK")
+    screen.move(midx - (screen.text_extents(l2) / 2), cy + 7)
+    screen.text(l2)
   else
     local inlev, outlev = 6, 2
     local lev = nil
@@ -5832,6 +5838,10 @@ do
       -- seeds, which is also how it works outside.
       r = 2.5 + (math.random() * 1.5)
         + ((1 - util.clamp(((semi or 0) + 24) / 48, 0, 1)) * 2.5),
+      -- a fixed-per-seed scale, standing in for how far into the screen it
+      -- spawned. Fixed at birth like LOSS's missing filaments, not redrawn
+      -- every frame, so a "near" seed reads as near and does not flicker.
+      depth = 0.55 + (math.random() * 0.9),
       rot = math.random() * math.pi * 2,
       spin = (math.random() * 2 - 1) * 0.8,
       seedy = math.random() * math.pi * 2,
@@ -5897,7 +5907,8 @@ do
     pappi[#pappi + 1] = {
       x = math.random() * 128, y = math.random() * 64,
       vx = (math.random() * 2 - 1) * 2, vy = (math.random() * 2 - 1) * 1.5,
-      r = 3 + (math.random() * 3), rot = math.random() * math.pi * 2,
+      r = 3 + (math.random() * 3), depth = 0.55 + (math.random() * 0.9),
+      rot = math.random() * math.pi * 2,
       spin = (math.random() * 2 - 1) * 0.6, seedy = math.random() * math.pi * 2,
       age = 0, life = 9 + (math.random() * 8), lvl = 0.4, w = 1,
     }
@@ -5928,7 +5939,7 @@ do
           x = math.floor(x / q + 0.5) * q
           y = math.floor(y / q + 0.5) * q
         end
-        local r = p.r * (0.85 + (out_amp_disp * 0.5))
+        local r = p.r * p.depth * (0.85 + (out_amp_disp * 0.5))
 
         -- THE CROWN. All the filaments go into one path and get one stroke:
         -- a stroke is a cairo flush, and twenty-eight seeds times ten flushes
@@ -6263,7 +6274,10 @@ function g.key(x, y, z)
       held_voice = nil
     end
   end
-  if z == 0 and kind ~= "ritratt" then return end
+  -- PAPPUS is SNAPSHOTS' own slots wearing a different picture on the norns
+  -- screen - the grid underneath it is still the 15x8 slot grid, so it needs
+  -- the release too, to finish a hold-to-save started on this page.
+  if z == 0 and kind ~= "ritratt" and kind ~= "pappus" then return end
 
   if kind == "grain" or kind == "grain2" then
     -- the chord you edit is the one belonging to the granulator whose page
@@ -6306,12 +6320,15 @@ function g.key(x, y, z)
       manual[y].step, manual[y].on = st, true
     end
     sent.taps = nil
-  elseif kind == "ritratt" then
+  elseif kind == "ritratt" or kind == "pappus" then
     -- Fifteen columns of slots and a sixteenth column of CLEAR keys. Hold a
     -- clear key and the grid becomes destructive for as long as you hold it,
     -- which is the only reason a hundred and twenty one-tap slots are safe to
     -- have: you cannot wipe one by accident with the same gesture that loads
     -- it.
+    --
+    -- PAPPUS reaches this branch too: it is SNAPSHOTS' own state under a
+    -- different screen, not a different page of grid behaviour.
     local st = snap_state()
     local nc = cols()
     if nc >= 16 and x == 16 then
@@ -6403,7 +6420,8 @@ function grid_redraw()
         g:led(x, i, lv)
       end
     end
-  elseif kind == "ritratt" then
+  elseif kind == "ritratt" or kind == "pappus" then
+    -- same slot grid PAPPUS's norns screen does not show
     local st = snap_state()
     for y = 1, NVOICE do
       for x = 1, math.min(SNAP_W, nn) do
