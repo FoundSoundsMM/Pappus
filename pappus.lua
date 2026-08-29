@@ -252,7 +252,7 @@ end
 
 -- MIDI note input. Notes drive the same eight voices the grid does, by
 -- writing straight into `grains` rather than shadowing it: the visualiser,
--- the FILTERBANK pitch lock and the grid display all read that table already,
+-- the RESONATOR pitch lock and the grid display all read that table already,
 -- so playing the keyboard moves every one of them without a second code
 -- path to keep in step. The grid's own chord is snapshotted on the way in
 -- and put back when MIDI notes are switched off, so nothing is lost.
@@ -387,11 +387,11 @@ local PAGES = {
     },
   },
   {
-    name = "FILTERBANK",
-    -- ten characters is the longest name on the instrument, and a page whose
-    -- cells carry modes needs the room: the header drops to the short form
-    -- only when the mode would otherwise be shaved away
-    short = "F.BANK",
+    name = "RESONATOR",
+    -- nine characters is close to the longest name on the instrument, and a
+    -- page whose cells carry modes needs the room: the header drops to the
+    -- short form only when the mode would otherwise be shaved away
+    short = "RESON",
     kind = "spettru",
     toggle = "p_freeze",
     rows = 2,
@@ -400,13 +400,13 @@ local PAGES = {
       -- much GRAINSWARM 1 enters this stage, E3 how much GRAINSWARM 2. Set
       -- one to zero and that granulator skips this module.
       { id = "p_in1", alt = "p_in2", label = "DRY IN", dual = true },
-      { id = "p_centre", label = "CENTRE", mode = "p_root" },
-      { id = "p_bw",     label = "WIDTH"  },
-      { id = "p_reso",   label = "RESO",   alt = "p_fb" },
-      { id = "p_morph",  label = "MORPH",  mode = "p_partials", bipolar = true },
-      { id = "p_skew",   label = "SKEW",   bipolar = true },
-      { id = "p_shape",  label = "SHAPE",  mode = "p_shape_mode" },
-      { id = "p_wet",    label = "WET"    },
+      { id = "p_freq",      label = "FREQ",   mode = "p_freqmode" },
+      { id = "p_structure", label = "STRUCT", bipolar = true },
+      { id = "p_bright",    label = "BRIGHT" },
+      { id = "p_damp",      label = "DAMP"   },
+      { id = "p_pos",       label = "POSN"   },
+      { id = "p_grain",     label = "GRAIN",  mode = "p_model" },
+      { id = "p_wet",       label = "WET"    },
     },
   },
   {
@@ -569,7 +569,7 @@ end
 -- one table, because this chunk is at Lua's 200-local ceiling
 -- Which granulator the visualisers are drawing. On a GRAINSWARM page it is
 -- that page's own; anywhere else it is the parent, because that is the one
--- whose chord FILTERBANK and the rest default to.
+-- whose chord RESONATOR and the rest default to.
 --
 -- This has to live BELOW the page table. As a local, PAGES is not in scope in
 -- anything declared above it - the name silently resolves to a nil global
@@ -927,9 +927,9 @@ local function send_voices(w)
   engine.gates(gt[1], gt[2], gt[3], gt[4], gt[5], gt[6], gt[7], gt[8])
   engine.probs(pr[1], pr[2], pr[3], pr[4], pr[5], pr[6], pr[7], pr[8])
   sent.taps = nil          -- LINK means the taps depend on the grid too
-  -- FILTERBANK's pitch lock follows the chord, so the chord moving has to
+  -- RESONATOR's pitch lock follows the chord, so the chord moving has to
   -- re-derive it. Cheap, and it means the lock is never a frame behind.
-  -- FILTERBANK is tuned to the chord, so the chord moving re-tunes the bank.
+  -- RESONATOR is tuned to the chord, so the chord moving re-tunes the bank.
   -- Only when SLICE is continuous: on a slow slice the whole point is that
   -- the bank keeps the chord it caught until the next tick.
   if send_bank and params:get("p_freeze") ~= 2 then send_bank() end
@@ -1252,23 +1252,12 @@ local function clock_label(knob)
 end
 
 -- ---------------------------------------------------------------------------
--- FILTERBANK: which of the sixteen bands sound
+-- RESONATOR - a Rings-style modal/string resonator
 --
--- VOICES is a count, not a selection, so something has to decide WHICH bands
--- go quiet. Spreading them evenly across the analysis window is the useful
--- answer: at VOICES 4 you hear four oscillators covering the whole span, not
--- the bottom four. Doing the choosing in Lua rather than in the graph means it
--- can get cleverer later - loudest-first, say - without a SynthDef change.
---
--- pnorm is the level correction. Sixteen oscillators summing incoherently grow
--- as sqrt(n), so dividing by sqrt(n) holds the level as VOICES moves.
--- ---------------------------------------------------------------------------
-
--- FILTERBANK - a morphing resonant filterbank
---
--- Forty-eight resonators: six partials on each of the eight grain voices. It
--- has no pitch and no scale of its own on purpose - the bank IS the chord, so
--- everything it rings is in key whatever you feed it.
+-- MODAL is forty-eight resonators: six partials on each of the eight grain
+-- voices, the same bank the old FILTERBANK ran. STRING is eight
+-- Karplus-Strong voices, one per grain voice, sharing the same tuning. The
+-- engine runs both and cross-fades on MODE.
 --
 -- This replaced a spectral resynthesiser, and the reason is worth keeping.
 -- That version analysed the input with sixteen zero-crossing counters and
@@ -1279,52 +1268,34 @@ end
 -- bank has the opposite failure mode - it has no opinion about the input at
 -- all, it rings where IT is tuned, and the input only decides how hard.
 --
--- The layout is computed here and sent as two forty-eight float arrays,
--- because every input to it - the chord, the partial stretch, the window, the
--- tilt, the grid matrix - already lives in Lua. SLICE and FREEZE then reduce
--- to "when is this allowed to send", which is why the engine has neither.
+-- The layout is computed here and sent as flat arrays, because every input
+-- to it - the chord, FREQUENCY's mode, STRUCTURE, BRIGHTNESS, POSITION -
+-- already lives in Lua. FREEZE reduces to "when is this allowed to send",
+-- which is why the engine has none of it.
 -- ---------------------------------------------------------------------------
 
-local NPART = 6                       -- partials per voice
+local NPART = 6                       -- partials per voice, MODAL
 local NBAND = NVOICE * NPART          -- forty-eight resonators
 local PQ_REF = 261.6256               -- C4: what a grain at semitone 0 rings
-
--- the grid's on/off matrix: row = grain voice, column = partial
-local pon = {}
-for v = 1, NVOICE do
-  pon[v] = {}
-  for k = 1, NPART do pon[v][k] = 1 end
-end
 
 -- what was last sent, so a still bank is not re-sent sixty times a second
 local bank_f, bank_a = {}, {}
 for i = 1, NBAND do bank_f[i], bank_a[i] = 0, 0 end
 
--- Turn the chosen order into the four tap numbers the engine wants: the first
--- stage reads the granulator (tap 0), each later stage reads the one before
--- it, and the master reads the last.
+-- the STRING path's own eight voices - one per grain voice, not per partial
+local vbank_f, vbank_a = {}, {}
+for v = 1, NVOICE do vbank_f[v], vbank_a[v] = 0, 0 end
 
-function spettru_partials()
-  return util.clamp(util.round(pval("p_partials")), 1, NPART)
-end
-
--- MORPH stretches the partial series. At zero it is harmonic - 1, 2, 3, 4 -
--- and every voice rings like a string. Positive stretches it, which is what
--- makes bells and struck metal inharmonic; negative compresses it towards a
--- cluster, which is closer to a gong. It is one exponent, so it sweeps
--- continuously and modulates well, which is the whole point of a MORPH.
+-- STRUCTURE stretches the partial series. At zero it is harmonic - 1, 2, 3,
+-- 4 - and every voice rings like a string. Positive stretches it, which is
+-- what makes bells and struck metal inharmonic; negative compresses it
+-- towards a cluster, which is closer to a gong. It is one exponent, so it
+-- sweeps continuously and modulates well, which is the whole point of a
+-- macro like this.
 function spettru_ratio(k)
-  return k ^ (1 + (util.clamp(pval("p_morph"), -1, 1) * 0.45))
+  return k ^ (1 + (util.clamp(pval("p_structure"), -1, 1) * 0.45))
 end
 
--- The frequency and level of all forty-eight, right now.
---
--- CENTRE and WIDTH are a gain window, not a tuning: they decide which part of
--- the bank is loud, so sweeping CENTRE reads as a filter sweep even though no
--- resonator has moved. SKEW tilts the same window - low end up or high end up
--- - which is the "balance the incoming signal" half of the job.
--- WHICH CHORD THE BANK IS TUNED TO.
---
 -- Forty-eight resonators is six partials on each of eight voices, and there
 -- are sixteen voices. Three partials each would fit both chords in and would
 -- halve the bank's depth, which is where its whole character lives - so the
@@ -1333,72 +1304,89 @@ end
 -- Whichever is FED IN HARDER, with GRAINSWARM 1 winning a tie. The bank has
 -- to be tuned to something, and "the one you are sending it most of" is the
 -- only answer that follows the routing rather than ignoring it: mute swarm 1
--- into FILTERBANK and the bank retunes to what is actually exciting it.
+-- into RESONATOR and the bank retunes to what is actually exciting it.
 function spettru_swarm()
   return (pval("p_in2") > pval("p_in1")) and 2 or 1
 end
 
+-- The frequency and level of all forty-eight MODAL resonators, and all eight
+-- STRING voices, right now.
+--
+-- FREQUENCY is a semitone control in all three modes:
+--   GRAINS  the chord the grains are playing tunes the bank, exactly as
+--           before; FREQUENCY is a free transpose ON TOP of that chord.
+--   FREE    one harmonic series off FREQUENCY itself, decoupled from the
+--           grains entirely: stack v takes FREQUENCY x v as its fundamental.
+--   SCALE   the same as FREE, except FREQUENCY is snapped to the nearest
+--           degree of the global scale first.
+--
+-- BRIGHTNESS and POSITION replace the old CENTRE/WIDTH/SKEW gain window with
+-- something that has a physical reading: BRIGHTNESS rolls the upper partials
+-- off (a dark body has none of them, a bright one keeps them all), and
+-- POSITION is the classic mode-shape-at-the-excitation-point formula -
+-- amplitude(partial k) proportional to |sin(pi * position * k)| - the same
+-- reason a string plucked at its centre loses its even harmonics.
 function spettru_layout()
   local w = spettru_swarm()
   local G = gr(w)
-  local ctr = util.clamp(pval("p_centre"), 20, 11500)
-  local bw = util.clamp(pval("p_bw"), 0.15, 6)
-  local skew = util.clamp(pval("p_skew"), -1, 1)
-  local np = spettru_partials()
-  local base = pval(swid(w, "pitch"))
+  local freqst = util.clamp(pval("p_freq"), -48, 48)
+  local mode = util.round(pval("p_freqmode"))
   local sc = pval("m_scale")
-  local free = pval("p_root") == 2
-  -- FREE decouples the bank from the chord: CENTRE becomes the root, and the
-  -- window slides up with it so WIDTH keeps meaning brightness rather than
-  -- gradually muting the whole bank as the root moves away from it.
-  local win = free and (ctr * 4) or ctr
-  local f, a = {}, {}
-  local live, sumsq = 0, 0
+  local bright = util.clamp(pval("p_bright"), 0, 1)
+  local falloff = 0.15 + (bright * 0.85)
+  local pos = util.clamp(pval("p_pos"), 0, 1)
+  -- FREE and SCALE both decouple the bank from the chord: the whole bank
+  -- becomes ONE harmonic series off a single root, spread across eight
+  -- v-anchored stacks (eight stacks spread over three octaves measured
+  -- 17 dB down, because the same total power split across widely separated
+  -- resonators catches far less of the input) - SCALE just snaps that root
+  -- to the scale first.
+  local freeish = mode ~= 1
+  local root_semi = freqst
+  if mode == 3 then root_semi = snap_to_scale(freqst, sc) end
+  local f, a, vf, va = {}, {}, {}, {}
+  local sumsq = 0
   for v = 1, NVOICE do
     local st = G[v]
-    local semi = snap_to_scale(base + st.semi + (OCTAVES[st.oct] * 12), sc)
-    local f0 = free and (ctr * v) or (PQ_REF * (2 ^ (semi / 12)))
+    local f0
+    if freeish then
+      f0 = PQ_REF * (2 ^ (root_semi / 12)) * v
+    else
+      local semi = snap_to_scale(
+        pval(swid(w, "pitch")) + st.semi + (OCTAVES[st.oct] * 12), sc)
+      f0 = PQ_REF * (2 ^ ((semi + freqst) / 12))
+    end
+    vf[v] = f0
+    va[v] = (st.on or freeish) and ((freeish and 1 or st.lvl)) or 0
     for k = 1, NPART do
       local i = ((v - 1) * NPART) + k
-      -- In FREE the whole bank is ONE harmonic series on CENTRE - partials 1
-      -- to 48 - rather than eight sparse stacks. Eight stacks spread over
-      -- three octaves measured 17 dB down, because the same total power split
-      -- across widely separated resonators catches far less of the input.
       local hz = util.clamp(
-        f0 * spettru_ratio(free and i or k), 20, 16000)
+        f0 * spettru_ratio(freeish and i or k), 20, 16000)
       local g = 0
-      if st.on or free then
-        local t = math.log(hz / win) / math.log(2)   -- octaves from the window
-        g = math.exp(-((t / bw) * (t / bw)))         -- the window
-        g = g * (2 ^ (skew * t * 0.5))               -- the tilt
-        g = g * (free and 1 or st.lvl)
-        -- the normalisation is taken BEFORE the mask, on purpose. WIDTH,
-        -- SKEW and the chord are about balance and should not change the
-        -- level; PARTIALS and the grid are subtractive, and switching a
-        -- resonator out should make the bank quieter, the way muting a band
-        -- on any other filterbank does.
+      if st.on or freeish then
+        g = falloff ^ (k - 1)                              -- BRIGHTNESS rolloff
+        g = g * math.abs(math.sin(math.pi * pos * k))       -- POSITION mode-shape
+        g = g * (freeish and 1 or st.lvl)
         sumsq = sumsq + (g * g)
-        if k <= np and pon[v][k] > 0 then live = live + 1 else g = 0 end
       end
       f[i], a[i] = hz, g
     end
   end
   -- Normalise the bank to constant total POWER, not to a count of lit
-  -- resonators. Counting was the obvious version and it is wrong: the window
-  -- and the tilt mean the forty-eight are not equal contributors, so dividing
-  -- by sqrt(count) made a narrow window quiet and a two-partial bank loud.
-  -- Scaling so the sum of squares is one makes WIDTH, SKEW and PARTIALS all
-  -- level-neutral, which is what you want from controls that are about
-  -- balance rather than about volume.
+  -- resonators. Counting was the obvious version and it is wrong: BRIGHTNESS
+  -- and POSITION mean the forty-eight are not equal contributors, so
+  -- dividing by sqrt(count) made a dark bank quiet and a bright one loud.
+  -- Scaling so the sum of squares is one makes both level-neutral, which is
+  -- what you want from controls that are about balance rather than volume.
   if sumsq > 1e-9 then
     local norm = 1 / math.sqrt(sumsq)
     for i = 1, NBAND do a[i] = util.clamp(a[i] * norm, 0, 1) end
   end
-  return f, a, live
+  return f, a, vf, va
 end
 
 function send_bank(force)
-  local f, a = spettru_layout()
+  local f, a, vf, va = spettru_layout()
   local changed = force and true or false
   for i = 1, NBAND do
     if math.abs(f[i] - bank_f[i]) > 0.02
@@ -1407,9 +1395,18 @@ function send_bank(force)
     end
     bank_f[i], bank_a[i] = f[i], a[i]
   end
+  for v = 1, NVOICE do
+    if math.abs(vf[v] - vbank_f[v]) > 0.02
+      or math.abs(va[v] - vbank_a[v]) > 0.0008 then
+      changed = true
+    end
+    vbank_f[v], vbank_a[v] = vf[v], va[v]
+  end
   if not changed then return end
   engine.pfrq(table.unpack(bank_f, 1, NBAND))
   engine.pamp(table.unpack(bank_a, 1, NBAND))
+  engine.pvfrq(table.unpack(vbank_f, 1, NVOICE))
+  engine.pvamp(table.unpack(vbank_a, 1, NVOICE))
 end
 
 -- The bank re-tunes whenever anything it depends on moves.
@@ -1422,11 +1419,6 @@ end
 function spettru_tick(dt)
   if params:get("p_freeze") == 2 then return end
   send_bank()
-end
-
-function spettru_on(v, k)
-  return gr(spettru_swarm())[v].on
-    and k <= spettru_partials() and pon[v][k] > 0
 end
 
 function spettru_band_hz(i)
@@ -1612,7 +1604,7 @@ local function update_timing()
   for i = 1, NTAP do
     local t = taps[i]
     -- LINK follows GRAINSWARM 1. It is the parent, and a delay that changed
-    -- which chord it was chained to when you moved a knob on FILTERBANK would be
+    -- which chord it was chained to when you moved a knob on RESONATOR would be
     -- the wrong kind of clever.
     local gv = grains[i]
     t.step = util.clamp(src[i].step, 0, n - 1)
@@ -2370,7 +2362,7 @@ local function add_params()
   -- ---- THE ROUTING ----
   --
   -- Eight faders, two per stage: how much of each granulator is fed in at
-  -- that point. A granulator entering at FILTERBANK flows through everything
+  -- that point. A granulator entering at RESONATOR flows through everything
   -- after it; one entering only at DIRECT has skipped the whole chain. That
   -- is what bypassing a module means here, and it is per granulator.
   --
@@ -2413,66 +2405,73 @@ local function add_params()
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("o_in2", function(x) engine.oin2(x) end)
 
-  params:add_separator("spettru", "FILTERBANK")
+  params:add_separator("spettru", "RESONATOR")
 
-  -- CENTRE and WIDTH are a WINDOW on the bank's gain, not a tuning. The
-  -- resonators sit where the chord puts them; these decide which of them are
-  -- loud, so sweeping CENTRE reads as a filter sweep with nothing detuning.
-  params:add_control("p_centre", "spettru centre",
-    controlspec.new(20, 11500, "exp", 0, 700, "Hz"))
-  params:set_action("p_centre", function() send_bank(true) end)
-
-  params:add_control("p_bw", "spettru width",
-    controlspec.new(0.15, 6, "exp", 0, 2.5, "oct"))
-  params:set_action("p_bw", function() send_bank(true) end)
-
-  -- RESONANCE is the ring time, and it is the character control: short is a
-  -- bank of bandpasses colouring what goes through, long is a bank of struck
-  -- bars that keeps sounding after the input stops.
-  params:add_control("p_reso", "spettru resonance",
-    controlspec.new(0, 1, "lin", 0, 0.35, ""))
-  params:set_action("p_reso", function(x) engine.preso(x) end)
-
-  -- harmonic at zero, stretched towards bell above it, compressed towards
-  -- gong below. One exponent on the partial series, so it sweeps continuously
-  -- and is worth modulating - which is what a MORPH is for.
-  params:add_control("p_morph", "spettru morph",
-    controlspec.new(-1, 1, "lin", 0, 0, ""))
-  params:set_action("p_morph", function() send_bank(true) end)
-
-  params:add_option("p_partials", "spettru partials",
-    { "1", "2", "3", "4", "5", "6" }, 6)
-  params:set_action("p_partials", function() send_bank(true) end)
-
-  -- tilt across the window: negative leans on the low resonators, positive on
-  -- the high ones. The grid does the same job one resonator at a time.
-  params:add_control("p_skew", "spettru skew",
-    controlspec.new(-1, 1, "lin", 0, 0, ""))
-  params:set_action("p_skew", function() send_bank(true) end)
-
-  -- waveshaping on the bank's OUTPUT, so it reads as an oscillator being
-  -- shaped rather than a filter being driven
-  params:add_control("p_shape", "spettru shape",
-    controlspec.new(0, 1, "lin", 0, 0, ""))
-  params:set_action("p_shape", function(x) engine.pshape(x) end)
-
-  params:add_option("p_shape_mode", "spettru shape mode",
-    { "SOFT", "FOLD", "WRAP" }, 1)
-  params:set_action("p_shape_mode", function(x) engine.pshapemode(x) end)
-
-  params:add_control("p_fb", "spettru feedback",
-    controlspec.new(0, 1, "lin", 0, 0, ""))
-  params:set_action("p_fb", function(x) engine.pfb(x) end)
-
-  -- Where the bank is TUNED FROM.
+  -- FREQUENCY is a semitone control in all three modes, not a Hz one - it
+  -- reads the same knob whether the bank is locked, free or scale-locked.
   --   GRAINS  the chord the grains are playing, six partials on each of the
-  --           eight voices. CENTRE is then only a gain window.
-  --   FREE    one harmonic series on CENTRE itself, decoupled from the
-  --           grains entirely: stack v takes CENTRE x v as its fundamental,
-  --           and the window follows two octaves above the root so WIDTH is
-  --           still a brightness control rather than a mute.
-  params:add_option("p_root", "spettru root", { "GRAINS", "FREE" }, 1)
-  params:set_action("p_root", function() send_bank(true) end)
+  --           eight voices, exactly as before - FREQUENCY becomes a free
+  --           transpose ON TOP of the chord rather than sitting unused.
+  --   FREE    one harmonic series on FREQUENCY itself, decoupled from the
+  --           grains entirely: stack v takes FREQUENCY x v as its
+  --           fundamental, same eight-stack shape as GRAINS.
+  --   SCALE   the same as FREE, except FREQUENCY is snapped to the nearest
+  --           degree of the global scale first - a quantized root instead
+  --           of a continuous one.
+  params:add_control("p_freq", "spettru frequency",
+    controlspec.new(-48, 48, "lin", 0, 0, "st"))
+  params:set_action("p_freq", function() send_bank(true) end)
+
+  params:add_option("p_freqmode", "spettru frequency mode",
+    { "GRAINS", "FREE", "SCALE" }, 1)
+  params:set_action("p_freqmode", function() send_bank(true) end)
+
+  -- STRUCTURE stretches the partial series - harmonic at zero, stretched
+  -- towards bell above it, compressed towards gong below - and, in STRING,
+  -- detunes a second comb per voice for the same "stiffer string" idea.
+  params:add_control("p_structure", "spettru structure",
+    controlspec.new(-1, 1, "lin", 0, 0, ""))
+  params:set_action("p_structure", function(x)
+    engine.pstruct(x)
+    send_bank(true)
+  end)
+
+  -- BRIGHTNESS is a low-pass filter on the excitation itself before either
+  -- bank hears it - Rings' own primary mechanism - and, in MODAL, it also
+  -- tilts the per-partial amplitude falloff the old WIDTH used to.
+  params:add_control("p_bright", "spettru brightness",
+    controlspec.new(0, 1, "lin", 0, 0.5, ""))
+  params:set_action("p_bright", function(x)
+    engine.pbright(x)
+    send_bank(true)
+  end)
+
+  -- DAMPING is the ring time, and it is the character control: short is a
+  -- bank of bandpasses colouring what goes through, long is a bank of struck
+  -- bars - or a string - that keeps sounding after the input stops.
+  params:add_control("p_damp", "spettru damping",
+    controlspec.new(0, 1, "lin", 0, 0.35, ""))
+  params:set_action("p_damp", function(x) engine.pdamp(x) end)
+
+  -- POSITION models where the exciter strikes/plucks the resonator: centred
+  -- cancels even harmonics (hollow, PWM-like), edge-struck leaves the whole
+  -- series intact. Per-partial in MODAL (pure Lua, the mode-shape formula),
+  -- a pick-position comb notch per voice in STRING.
+  params:add_control("p_pos", "spettru position",
+    controlspec.new(0, 1, "lin", 0, 0.18, ""))
+  params:set_action("p_pos", function(x)
+    engine.ppos(x)
+    send_bank(true)
+  end)
+
+  -- MODE picks the resonator model; GRAIN, paired with it, blends filtered
+  -- noise into the excitation path - Mutable Elements' "blow" character.
+  params:add_option("p_model", "spettru model", { "MODAL", "STRING" }, 1)
+  params:set_action("p_model", function(x) engine.pmodel(x) end)
+
+  params:add_control("p_grain", "spettru grain",
+    controlspec.new(0, 1, "lin", 0, 0, ""))
+  params:set_action("p_grain", function(x) engine.pgrain(x) end)
 
   params:add_control("p_wet", "spettru wet",
     controlspec.new(0, 1, "lin", 0, 0, ""))
@@ -3260,9 +3259,6 @@ local function snap_defaults()
     end
   end
   for i = 1, NTAP do manual[i].step, manual[i].on = i - 1, (i == 1) end
-  for v = 1, NVOICE do
-    for k = 1, NPART do pon[v][k] = 1 end
-  end
   send_voices()
   send_voices(2)
   sent.taps = nil
@@ -3604,10 +3600,10 @@ function init()
     mod_last = now
     mod_advance(dt)
     mod_apply()
-    -- FILTERBANK's bank is laid out here rather than in the display tick: MORPH,
-    -- CENTRE and SKEW are all modulation destinations, so the layout has to
-    -- be recomputed at the rate the modulators move, not at the rate the
-    -- screen redraws.
+    -- RESONATOR's bank is laid out here rather than in the display tick:
+    -- STRUCTURE, FREQUENCY, BRIGHTNESS and POSITION are all modulation
+    -- destinations, so the layout has to be recomputed at the rate the
+    -- modulators move, not at the rate the screen redraws.
     spettru_tick(dt)
   end
   mod_metro:start()
@@ -5110,7 +5106,7 @@ end
 -- but nothing is exciting it.
 -- ---------------------------------------------------------------------------
 
--- the FILTERBANK visualiser draws the bank, so it reads the chord the bank is
+-- the RESONATOR visualiser draws the bank, so it reads the chord the bank is
 -- actually tuned to - which INPUT decides
 function voice_semi(i)
   local w = spettru_swarm()
@@ -5122,15 +5118,14 @@ end
 
 -- mirrors the engine's per-voice comb tuning exactly
 -- ---------------------------------------------------------------------------
--- FILTERBANK visualiser: the analysis window and what is in it
+-- RESONATOR visualiser: the analysis window and what is in it
 --
 -- Log frequency across the screen, one mark per band. The height of a mark is
 -- that band's live level, polled from... nothing: the tracked levels live in
--- the engine and polling sixteen of them would cost sixteen polls at 15 Hz.
--- So this draws what the KNOBS do, exactly and honestly - where each band
--- sits, which ones VOICES has left sounding, how WARP has bent the spacing,
--- where PITCH has moved the lot - and animates the whole field at the SLICE
--- rate so you can see how fast it is re-analysing.
+-- Lua already - this draws what the KNOBS do, exactly and honestly - where
+-- each band sits, how BRIGHTNESS and POSITION have shaped its level, where
+-- FREQUENCY has moved the lot - and animates the whole field at the
+-- modulator rate so you can see how fast it is re-tuning.
 --
 -- The band positions are computed by spettru_band_hz, the same function the
 -- engine's arithmetic mirrors, so the picture cannot drift from the sound.
@@ -5151,11 +5146,11 @@ function freq_x(f)
 end
 
 -- ---------------------------------------------------------------------------
--- FILTERBANK visualiser: forty-eight strings
+-- RESONATOR visualiser: forty-eight strings
 --
 -- Each resonator is drawn as a string standing at its own frequency, and a
 -- grain landing plucks the lot: every string takes a kick scaled by how much
--- gain it has, and then rings down at the RESONANCE time - the same number the
+-- gain it has, and then rings down at the DAMPING time - the same number the
 -- engine is using, so a long ring really does keep moving for longer.
 --
 -- The ripple is the fundamental mode of a string fixed at both ends: one
@@ -5176,11 +5171,11 @@ for i = 1, NBAND do
 end
 
 function spettru_strings(dt)
-  -- how quickly the wobble's size follows the live level. Reuses RESONANCE's
-  -- curve so a long RESONANCE still reads as a slower, more liquid picture,
+  -- how quickly the wobble's size follows the live level. Reuses DAMPING's
+  -- curve so a long DAMPING still reads as a slower, more liquid picture,
   -- but as a settling time on an envelope follower now, not a decay after a
   -- kick - there is no kick left to decay from.
-  local rt = 0.003 * (900 ^ util.clamp(pval("p_reso"), 0, 1))
+  local rt = 0.003 * (900 ^ util.clamp(pval("p_damp"), 0, 1))
   local ease = 1 - math.exp(-dt / math.max(rt * 1.6, 0.22))
   local drive = math.min(out_amp_disp * 2.4, 1)
   local lo, hi = 1e9, -1e9
@@ -5273,6 +5268,10 @@ function draw_spettru()
     screen.level(15)
     screen.move(126, top + 7)
     screen.text_right("FRZ")
+  elseif params:get("p_model") == 2 then
+    screen.level(5)
+    screen.move(126, top + 7)
+    screen.text_right("STR")
   end
 end
 
@@ -5497,7 +5496,7 @@ meter_seen = { false, false, false, false, false, false }
 local HAL_BOX = {
   { n = "GR1", x = 0,  row = -1, m = 1 },
   { n = "GR2", x = 0,  row =  1, m = 2 },
-  { n = "FIL", x = 42, row =  0, m = 3 },
+  { n = "RES", x = 42, row =  0, m = 3 },
   { n = "DLY", x = 64, row =  0, m = 4 },
   { n = "COL", x = 86, row =  0, m = 5 },
   { n = "OUT", x = 108, row = 0, m = 6 },
@@ -5542,7 +5541,7 @@ local function hal_wire(gi, b, lvl)
   local enter = (gi == 1) and by or (by + HAL_BH)   -- top or bottom edge
   local tx = bx + (HAL_BW / 2)
   if b.m == 3 then
-    -- straight into FILTERBANK's side: it is the first box and the space in
+    -- straight into RESONATOR's side: it is the first box and the space in
     -- front of it is empty, so a bus would be ceremony
     return { { gx + HAL_BW, sy }, { bx, by + (HAL_BH / 2) } }
   end
@@ -5793,7 +5792,7 @@ end
 --   N.TONE        how many filaments each crown has
 --   LOSS          filaments missing from the crown
 --   CRUSH         positions snap to a grid, so the drift steps
---   FILTERBANK    where the seeds are in the air: a high centre lifts them
+--   RESONATOR     where the seeds are in the air: a high FREQUENCY lifts them
 --   the grain     its own level sets the seed's size and brightness, its
 --                 pitch how high it enters
 --
@@ -5833,8 +5832,8 @@ do
     -- what dense playing ought to look like.
     if #pappi >= PAPPI_MAX then return end
     since_seed = 0
-    -- a high note enters high, and FILTERBANK's centre lifts the whole field
-    local lift = params:lookup_param("p_centre").controlspec:unmap(pval("p_centre"))
+    -- a high note enters high, and RESONATOR's FREQUENCY lifts the whole field
+    local lift = params:lookup_param("p_freq").controlspec:unmap(pval("p_freq"))
     local ny = util.clamp(52 - (util.clamp((semi or 0) + 24, 0, 48) / 48 * 34)
       - (lift * 12) + (math.random() * 8 - 4), 4, 60)
     pappi[#pappi + 1] = {
@@ -6093,8 +6092,8 @@ function redraw()
       value = string.format("%s %+.0fdB", (t > 0) and "TREBLE" or "BASS",
         math.abs(t) * 12)
     end
-  elseif c.id == "p_morph" then
-    local m = pval("p_morph")
+  elseif c.id == "p_structure" then
+    local m = pval("p_structure")
     if math.abs(m) < 0.02 then
       value = "HARMONIC"
     else
@@ -6229,8 +6228,8 @@ function cols()
   return (g.cols and g.cols > 0) and g.cols or 16
 end
 
--- Setting one cell from a grid column. Shared by the generic parameter-row
--- fallback and by FILTERBANK, whose rows are offset by the band row(s) above.
+-- Setting one cell from a grid column. Shared by every page's generic
+-- parameter-row fallback, RESONATOR included.
 function grid_set_cell(cell, x, nc)
   local p = params:lookup_param(cell.id)
   if is_option(cell.id) then
@@ -6364,15 +6363,6 @@ function g.key(x, y, z)
         snap_pulse(i)
       end
     end
-  elseif kind == "spettru" then
-    -- The bank laid out the way the grid already reads on GRAINSWARM: one row
-    -- per voice, and the first six columns are that voice's six partials.
-    -- Tapping one takes a resonator out of the bank, which is the "skew
-    -- individual filters" half of the job - a per-partial notch you can play.
-    if x <= NPART then
-      pon[y][x] = (pon[y][x] > 0) and 0 or 1
-      send_bank(true)
-    end
   else
     -- COLOUR, MODNI and SIGNAL: row = cell, x sets its value
     local cell = cell_at(PAGES[page], y)
@@ -6443,20 +6433,6 @@ function grid_redraw()
         g:led(x, y, lv)
       end
       if nn >= 16 then g:led(16, y, st.clear and 15 or 3) end
-    end
-  elseif kind == "spettru" then
-    -- one row per voice, six columns of partials. Bright means it is in the
-    -- bank and its voice is playing; dim means it is switched off; the middle
-    -- level means it is on but its grain is not.
-    local np = spettru_partials()
-    for v = 1, NVOICE do
-      for k = 1, math.min(NPART, nn) do
-        local lv = 1
-        if pon[v][k] > 0 and k <= np then
-          lv = gr(spettru_swarm())[v].on and 13 or 5
-        end
-        g:led(k, v, lv)
-      end
     end
   else
     for i = 1, math.min(#PAGES[page].cells, 8) do

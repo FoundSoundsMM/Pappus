@@ -178,7 +178,7 @@ settle(120, 0.3, true); shot("2 GRAINSWARM 2/2 window")
 params:set("m_win_start", 0); params:set("m_win_end", 1)
 settle(30, 0.3, true); shot("2 GRAINSWARM 2/2 full window")
 
--- page 3, FILTERBANK
+-- page 3, RESONATOR
 params:set("m_voices", 5); params:set("m_vspread", 0.6)
 -- GRAINSWARM 2, its own pages. The two things that only exist here: the RATE
 -- cell, which is decoupled by default and shows the chain mark only when set
@@ -202,42 +202,41 @@ params:set("n_src", 2)
 
 goto_page(PG[5])
 local FF = {
-  { name = "3 FILTERBANK default" },
-  { name = "3 FILTERBANK narrow window", p_bw = 0.7 },
-  { name = "3 FILTERBANK wide, low",     p_bw = 5, p_centre = 180 },
-  { name = "3 FILTERBANK 2 partials",    p_partials = 2 },
-  { name = "3 FILTERBANK morph bell",    p_morph = 0.8 },
-  { name = "3 FILTERBANK morph gong",    p_morph = -0.8 },
-  { name = "3 FILTERBANK skew high",     p_skew = 0.9 },
-  { name = "3 FILTERBANK skew low",      p_skew = -0.9 },
-  { name = "3 FILTERBANK long ring",     p_reso = 0.95 },
-  { name = "3 FILTERBANK short ring",    p_reso = 0.05 },
-  { name = "3 FILTERBANK shape fold",    p_shape = 0.8, p_shape_mode = 2 },
-  { name = "3 FILTERBANK frozen",        p_freeze = 2 },
-  { name = "3 FILTERBANK free root",     p_root = 2 },
-  { name = "3 FILTERBANK free, low",     p_root = 2, p_centre = 120 },
+  { name = "3 RESONATOR default" },
+  { name = "3 RESONATOR structure bell",   p_structure = 0.8 },
+  { name = "3 RESONATOR structure gong",   p_structure = -0.8 },
+  { name = "3 RESONATOR bright dark",      p_bright = 0.1 },
+  { name = "3 RESONATOR bright open",      p_bright = 0.95 },
+  { name = "3 RESONATOR damp long",        p_damp = 0.95 },
+  { name = "3 RESONATOR damp short",       p_damp = 0.05 },
+  { name = "3 RESONATOR position centre",  p_pos = 0.5 },
+  { name = "3 RESONATOR position edge",    p_pos = 0.02 },
+  { name = "3 RESONATOR grain noisy",      p_grain = 0.8 },
+  { name = "3 RESONATOR string mode",      p_model = 2 },
+  { name = "3 RESONATOR frozen",           p_freeze = 2 },
+  { name = "3 RESONATOR free root",        p_freqmode = 2 },
+  { name = "3 RESONATOR scale root, low",  p_freqmode = 3, p_freq = -24 },
 }
 for _, f in ipairs(FF) do
-  params:set("p_centre", f.p_centre or 700)
-  params:set("p_bw", f.p_bw or 2.5)
-  params:set("p_partials", f.p_partials or 6)
-  params:set("p_morph", f.p_morph or 0)
-  params:set("p_skew", f.p_skew or 0)
-  params:set("p_reso", f.p_reso or 0.35)
-  params:set("p_shape", f.p_shape or 0)
-  params:set("p_shape_mode", f.p_shape_mode or 1)
+  params:set("p_freq", f.p_freq or 0)
+  params:set("p_freqmode", f.p_freqmode or 1)
+  params:set("p_structure", f.p_structure or 0)
+  params:set("p_bright", f.p_bright or 0.5)
+  params:set("p_damp", f.p_damp or 0.35)
+  params:set("p_pos", f.p_pos or 0.18)
+  params:set("p_model", f.p_model or 1)
+  params:set("p_grain", f.p_grain or 0)
   params:set("p_freeze", f.p_freeze or 1)
-  params:set("p_root", f.p_root or 1)
   params:set("p_wet", 0.8)
   settle(40, 0.3, true)
   shot(f.name)
   settle(1, 0.3, true)
-  if f.name == "3 FILTERBANK default" then
-    for q = 1, 3 do settle(1, 0.3, true); shot("3 FILTERBANK strings " .. q) end
+  if f.name == "3 RESONATOR default" then
+    for q = 1, 3 do settle(1, 0.3, true); shot("3 RESONATOR strings " .. q) end
   end
 end
 params:set("p_wet", 0); params:set("p_freeze", 1)
-params:set("p_root", 1)
+params:set("p_freqmode", 1)
 
 -- page 4, DELAY
 goto_page(PG[6])

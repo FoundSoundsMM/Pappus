@@ -1,4 +1,4 @@
-"""FILTERBANK: is the bank actually tuned to the chord?
+"""RESONATOR: is the bank actually tuned to the chord?
 
 This is the claim the whole redesign rests on. The old spectral resynthesiser
 put its oscillators wherever the zero-crossing counters landed, which for a
@@ -8,10 +8,13 @@ whether the peaks come out on the notes the grains are playing.
 
   * one grain at semitone 0 gives peaks on the harmonic series of C4
   * a grain a fifth up moves every peak by a fifth, ratios intact
-  * MORPH stretches the series - partial six lands well above 6x
-  * PARTIALS 2 removes the upper peaks and leaves the lower ones
-  * RESONANCE lengthens the tail after the input stops
-  * WIDTH and SKEW rebalance without moving anything
+  * STRUCTURE stretches the series - partial six lands well above 6x
+  * BRIGHTNESS rolls the upper partials off; the fundamental is untouched
+  * DAMPING lengthens the tail after the input stops
+  * POSITION at 0.5 cancels the EVEN partials exactly - the textbook
+    mode-shape-at-the-excitation-point result - and leaves the odd ones alone
+  * STRING mode (a whole second, Karplus-Strong signal path) still lands its
+    fundamental on the chord
 
 Everything is rendered with a broadband source through the granulator, which
 is what the bank actually meets in use. A resonator does not care what the
@@ -35,7 +38,7 @@ SRC = r'''
 # two seconds.
 # WET at 1 in MIX mode replaces the dry path entirely, so what is measured is
 # the bank alone. Muting the GRA fader would NOT do it: the fader sits on the
-# granulator output and FILTERBANK reads that same tap, so it would mute the
+# granulator output and RESONATOR reads that same tap, so it would mute the
 # exciter as well.
 PRESETS = [("m_rate", 8), ("m_size", 1.0), ("p_wet", 1.0),
            ("s_wet", 0.0)]
@@ -58,7 +61,7 @@ SCRIPT = r'''
 
 fork {
 RENDERS
-	"FILTERBANK TEST DONE".postln;
+	"RESONATOR TEST DONE".postln;
 	0.5.wait;
 	1.exit;
 };
@@ -68,12 +71,13 @@ RENDERS
 CASES = [
     ("root",   []),
     ("fifth",  [("m_pitch", 7)]),
-    ("bell",   [("p_morph", 0.8)]),
-    ("two",    [("p_partials", 2)]),
-    ("ringlo", [("p_reso", 0.02)]),
-    ("ringhi", [("p_reso", 0.95)]),
-    ("skewhi", [("p_skew", 0.9)]),
-    ("skewlo", [("p_skew", -0.9)]),
+    ("struct", [("p_structure", 0.8)]),
+    ("dark",   [("p_bright", 0.05)]),
+    ("bright", [("p_bright", 0.95)]),
+    ("ringlo", [("p_damp", 0.02)]),
+    ("ringhi", [("p_damp", 0.95)]),
+    ("posmid", [("p_pos", 0.5)]),
+    ("string", [("p_model", 2)]),
 ]
 # the tail cases gate the source off at 5 s so the ring can be measured
 TAIL = {"ringlo", "ringhi"}
@@ -159,12 +163,12 @@ if __name__ == "__main__":
     import numpy as np
     if "--render" in sys.argv:
         H.run(H.build(SRC + build_script()), "/tmp/spettru.scd",
-              timeout=2400, expect="FILTERBANK TEST DONE")
+              timeout=2400, expect="RESONATOR TEST DONE")
         print("rendered")
 
     fails = []
 
-    print("\n=== is the bank on the chord? ===")
+    print("\n=== is the bank on the chord? (MODAL, default) ===")
     fr, sp = spec("sp_root")
     floor = float(np.median(sp[(fr > 60) & (fr < 8000)]))
     for k in range(1, 7):
@@ -189,62 +193,70 @@ if __name__ == "__main__":
             fails.append("fifth, partial %d off by %+.0f cents" % (k, cents))
         print(f"  partial {k}  {f:7.1f} Hz   {cents:+5.0f} cents   {ok}")
 
-    print("\n=== MORPH stretches the series ===")
-    fr, sp = spec("sp_bell")
+    print("\n=== STRUCTURE stretches the series ===")
+    fr, sp = spec("sp_struct")
     want = C4 * (6 ** (1 + (0.8 * 0.45)))
     _, cents = peak_near(fr, sp, want, rel=0.06, floor=floor)
     d = db(level(fr, sp, want, 0.06), floor)
     ok = "ok" if (abs(cents) < 90 and d > 8) else "FAIL"
     if ok == "FAIL":
-        fails.append("morphed partial 6 not at %.0f Hz (%+.0f cents, %+.1f dB)"
+        fails.append("stretched partial 6 not at %.0f Hz (%+.0f cents, %+.1f dB)"
                      % (want, cents, d))
     print(f"  partial 6 stretched to {want:7.1f} Hz   {cents:+5.0f} cents"
           f"   {d:+6.1f} dB   {ok}")
     d6 = db(level(fr, sp, C4 * 6), floor)
     print(f"  ...and 6x C4 ({C4*6:.0f} Hz) is now only {d6:+.1f} dB over floor")
 
-    print("\n=== PARTIALS 2 keeps the bottom, drops the top ===")
-    fr, sp = spec("sp_two")
-    fr0, sp0 = spec("sp_root")
-    for k, expect in ((1, "kept"), (2, "kept"), (5, "gone"), (6, "gone")):
-        d = db(level(fr, sp, C4 * k), level(fr0, sp0, C4 * k))
-        ok = "ok" if ((expect == "kept" and d > -6)
-                      or (expect == "gone" and d < -8)) else "FAIL"
-        if ok == "FAIL":
-            fails.append("PARTIALS 2: partial %d is %+.1f dB, wanted %s"
-                         % (k, d, expect))
-        print(f"  partial {k}  {d:+6.1f} dB vs full bank   ({expect})   {ok}")
+    print("\n=== BRIGHTNESS rolls the top off, leaves the fundamental alone ===")
+    frd, spd = spec("sp_dark")
+    frb, spb = spec("sp_bright")
+    d1 = db(level(frd, spd, C4), level(frb, spb, C4))
+    d6 = db(level(frd, spd, C4 * 6), level(frb, spb, C4 * 6))
+    ok1 = "ok" if abs(d1) < 6 else "FAIL"
+    ok6 = "ok" if d6 < -18 else "FAIL"
+    if ok1 == "FAIL":
+        fails.append("BRIGHTNESS moved the fundamental %+.1f dB - it should "
+                     "be untouched (falloff^0 = 1)" % d1)
+    if ok6 == "FAIL":
+        fails.append("BRIGHTNESS dark vs bright only moved partial 6 by "
+                     "%+.1f dB" % d6)
+    print(f"  partial 1, dark vs bright   {d1:+6.1f} dB   {ok1}")
+    print(f"  partial 6, dark vs bright   {d6:+6.1f} dB   {ok6}")
 
-    print("\n=== RESONANCE is a ring time ===")
+    print("\n=== DAMPING is a ring time ===")
     lo, hi = tail("sp_ringlo"), tail("sp_ringhi")
     ok = "ok" if hi > lo * 3 else "FAIL"
     if ok == "FAIL":
         fails.append("ring times too close: %.2f s vs %.2f s" % (lo, hi))
-    print(f"  RESO 0.02  tail to -40 dB  {lo:5.2f} s")
-    print(f"  RESO 0.95  tail to -40 dB  {hi:5.2f} s   {ok}")
+    print(f"  DAMP 0.02  tail to -40 dB  {lo:5.2f} s")
+    print(f"  DAMP 0.95  tail to -40 dB  {hi:5.2f} s   {ok}")
 
-    print("\n=== SKEW tilts without detuning ===")
-    for tag, lab in (("sp_skewhi", "SKEW +0.9"), ("sp_skewlo", "SKEW -0.9")):
-        fr, sp = spec(tag)
-        loe = level(fr, sp, C4)
-        hie = level(fr, sp, C4 * 5)
-        _, cents = peak_near(fr, sp, C4, floor=floor)
-        print(f"  {lab}   high/low {db(hie, loe):+6.1f} dB"
-              f"   fundamental {cents:+4.0f} cents")
-        if abs(cents) > 45:
-            fails.append("%s detuned the fundamental by %+.0f cents"
-                         % (lab, cents))
-    frh, sph = spec("sp_skewhi")
-    frl, spl = spec("sp_skewlo")
-    tilt = db(level(frh, sph, C4 * 5), level(frh, sph, C4)) - \
-        db(level(frl, spl, C4 * 5), level(frl, spl, C4))
-    ok = "ok" if tilt > 6 else "FAIL"
+    print("\n=== POSITION at 0.5 cancels the even partials exactly ===")
+    fr, sp = spec("sp_posmid")
+    for k in range(1, 7):
+        f = C4 * k
+        d = db(level(fr, sp, f), floor)
+        even = (k % 2 == 0)
+        ok = "ok" if ((even and d < 6) or ((not even) and d > 10)) else "FAIL"
+        if ok == "FAIL":
+            fails.append("POSITION 0.5, partial %d (%s): %+.1f dB over floor"
+                         % (k, "even" if even else "odd", d))
+        print(f"  partial {k} ({'even' if even else 'odd '})"
+              f"   {d:+6.1f} dB over floor   {ok}")
+
+    print("\n=== STRING mode still lands on the chord ===")
+    fr, sp = spec("sp_string")
+    amp, cents = peak_near(fr, sp, C4, floor=floor)
+    d = db(level(fr, sp, C4), floor)
+    ok = "ok" if (abs(cents) < 60 and d > 8) else "FAIL"
     if ok == "FAIL":
-        fails.append("SKEW moved the balance only %.1f dB" % tilt)
-    print(f"  SKEW spans {tilt:+.1f} dB of high/low balance   {ok}")
+        fails.append("STRING fundamental: %+.0f cents, %+.1f dB over floor"
+                     % (cents, d))
+    print(f"  fundamental  {C4:7.1f} Hz   {cents:+5.0f} cents"
+          f"   {d:+6.1f} dB over floor   {ok}")
 
     if fails:
         print("\n".join(["\nFAILURES:"] + ["  " + f for f in fails]))
-        print("FILTERBANK TEST FAILED")
+        print("RESONATOR TEST FAILED")
         sys.exit(1)
-    print("\nFILTERBANK OK")
+    print("\nRESONATOR OK")

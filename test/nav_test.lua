@@ -150,10 +150,10 @@ params:set(id, def)
 
 -- an option cell is already round: pushing E2 must not scramble it
 goto_page_index(page_of("spettru"))
-assert(goto_cell(2), "could not select FILTERBANK's CENTRE cell")
-local oid = "p_root"
+assert(goto_cell(2), "could not select RESONATOR's FREQ cell")
+local oid = "p_freqmode"
 params:set(oid, 2)
--- select the CENTRE cell, whose mode is p_root, and push E3
+-- select the FREQ cell, whose mode is p_freqmode, and push E3
 key(6, 1); key(6, 0)
 check(params:get(oid) == 2, "push E3 changed an option that was already round")
 key(4, 1); key(4, 0)
@@ -161,10 +161,10 @@ key(4, 1); key(4, 0)
 -- get() is map(unmap(v)) and on a warped spec that comes back a whisker off
 -- the number that went in. Hardware does this too; the mock used to hide it.
 do
-  local want = params:lookup_param("p_centre").controlspec.default
-  check(math.abs(params:get("p_centre") - want) < (want * 1e-9),
-    "push E1 did not default CENTRE: wanted " .. want .. ", got "
-    .. params:get("p_centre"))
+  local want = params:lookup_param("p_freq").controlspec.default
+  check(math.abs(params:get("p_freq") - want) < 1e-9,
+    "push E1 did not default FREQ: wanted " .. want .. ", got "
+    .. params:get("p_freq"))
 end
 
 -- long K2 puts the selected parameter back AND takes the modulator off it

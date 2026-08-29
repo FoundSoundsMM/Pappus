@@ -1,7 +1,7 @@
 // Engine_Pappus
 // Pappus - scatter to the wind. A chain of Torso S-4 style devices:
 //
-//   GRAINSWARM 1 and 2 (parallel) > FILTERBANK > DELAY > COLOUR > out,
+//   GRAINSWARM 1 and 2 (parallel) > RESONATOR > DELAY > COLOUR > out,
 //   where SIGNAL is the routing: each stage has an amount of each
 //   granulator fed into it, so either one can skip any part of the chain
 //
@@ -97,7 +97,7 @@ Engine_Pappus : CroneEngine {
 		// SIX METERS, on a control bus. SIGNAL draws the signal flow with a
 		// live level on every box, and a level Lua guessed at would be a
 		// drawing of something nobody measured.
-		//   1 GRAINSWARM 1   2 GRAINSWARM 2   3 FILTERBANK
+		//   1 GRAINSWARM 1   2 GRAINSWARM 2   3 RESONATOR
 		//   4 DELAY        5 COLOUR         6 OUT
 		mbus = Bus.control(srv, 6);
 		srv.sync;
@@ -119,27 +119,33 @@ Engine_Pappus : CroneEngine {
 			arg inbusl = 0, inbusr = 1, outbus = 0,
 				mrate = 8, msize = 0.12, mcontour = 8,
 				mbuflen = 8, mwinstart = 0, mwinend = 1, mstrum = 0,
-				// FILTERBANK, a resonant filterbank. Forty-eight resonators -
-				// six partials on each of the eight grain voices - so the
-				// bank is always tuned to the chord the grains are playing
-				// and there is no pitch or scale control of its own.
+				// RESONATOR, a Rings-style modal/string resonator. MODAL is
+				// forty-eight resonators - six partials on each of the eight
+				// grain voices - tuned to the chord the grains are playing (or
+				// FREQUENCY, in FREE/SCALE), with STRUCTURE stretching the
+				// partial series. STRING is eight Karplus-Strong voices, one per
+				// grain voice, sharing the same tuning. The two run together and
+				// cross-fade on MODE.
 				//
-				// The whole layout is computed in Lua and arrives as two
-				// arrays: where each resonator sits and how loud it is. That
-				// is deliberate. The frequencies depend on the grain chord,
-				// the partial stretch, the analysis window, the tilt and the
-				// grid's on/off matrix - five things that are all already in
-				// Lua - and doing it there costs the graph nothing at all.
-				// SLICE and FREEZE are then simply "when is Lua allowed to
-				// send", which is why neither appears here.
+				// The whole layout is computed in Lua and arrives as flat
+				// arrays: where each resonator/string sits and how loud it is.
+				// That is deliberate - the frequencies depend on the grain
+				// chord, FREQUENCY's mode, STRUCTURE and POSITION, which are all
+				// already in Lua, and doing it there costs the graph nothing at
+				// all. FREEZE is then simply "when is Lua allowed to send",
+				// which is why it does not appear here.
 				pfrq = #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 					0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 					0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 				pamp = #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 					0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 					0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-				preso = 0.3, pshape = 0, pshapemode = 1,
-				pfb = 0, pwet = 0,
+				// the STRING path's own eight voices - base frequency and level,
+				// one per grain voice rather than one per partial
+				pvfrq = #[0, 0, 0, 0, 0, 0, 0, 0],
+				pvamp = #[0, 0, 0, 0, 0, 0, 0, 0],
+				pdamp = 0.35, pbright = 0.5, pstruct = 0, ppos = 0.18,
+				pmodel = 1, pgrain = 0, pwet = 0,
 				mscan = 0.666, mscanmode = 1, mdelay = 0.25,
 				mspray = 0, mspraymode = 1, melen = 1, mephase = 0,
 				mswarm = 0, mswarmmode = 1, mlock = 0, msos = 0, mtilt = 0,
@@ -182,13 +188,13 @@ Engine_Pappus : CroneEngine {
 				// seasick at the top.
 				kwow = 0,
 				// ROUTING. Which tap each stage takes as its input, and which
-				// the master takes. 0 = the granulator, 1 = FILTERBANK's output,
+				// the master takes. 0 = the granulator, 1 = RESONATOR's output,
 				// 2 = DELAY's, 3 = COLOUR's. Lua turns a permutation into
 				// these four numbers.
 				// ROUTING, and it is the whole mixer now.
 				//
 				// Each stage has an amount of GRAINSWARM 1 and an amount of
-				// GRAINSWARM 2 fed INTO it. A granulator entering at FILTERBANK
+				// GRAINSWARM 2 fed INTO it. A granulator entering at RESONATOR
 				// flows on through everything after it; one entering only at
 				// COLOUR has skipped the first two; one entering only at OUT
 				// has skipped the lot. That is what "bypass a module" means
@@ -212,7 +218,7 @@ Engine_Pappus : CroneEngine {
 				// The later feeds are for moving WHERE a granulator joins:
 				// turn one up and its own head feed down, and it has skipped
 				// everything before that point.
-				pin1 = 0.7, pin2 = 0.7,        // into FILTERBANK
+				pin1 = 0.7, pin2 = 0.7,        // into RESONATOR
 				sin1 = 0, sin2 = 0,            // into DELAY
 				kin1 = 0, kin2 = 0,            // into COLOUR
 				oin1 = 0, oin2 = 0,            // straight to the output
@@ -221,8 +227,10 @@ Engine_Pappus : CroneEngine {
 
 			var lagt = 0.02, envref = 0.5;
 			var in, frnd, mkgrain, graw, graw2, gsum, gsum2, gfeed, msig;
-			var prng, psh, pdrv, pfl, pfr, pal, par, pones;
-			var pfbin, pfbout, plfb, pana, pmono;
+			var prng, pfl, pfr, pal, par, pones;
+			var plfb, pana, pmono, pbrhz, pnoiz;
+			var fmodal, fstring, mfade;
+			var svfrq, svamp, sdec, sdet, spos;
 			var pin, kin, omix, mcp;
 			var fsum, fmix, fsend, fwt;
 			var presig, sfeed;
@@ -263,31 +271,22 @@ Engine_Pappus : CroneEngine {
 			// 0 dB by construction, so flat really is flat.
 
 			// The engine already owns the single LocalIn/LocalOut pair a
-			// SynthDef is allowed, down in COLOUR's crush. Rather than a second
-			// one - which SC rejects - the pair carries a third channel for
-			// FILTERBANK's feedback. Read here, written at the same LocalOut.
-			// One LocalIn/LocalOut pair is all a SynthDef gets, so this one
-			// carries everything that has to cross a block boundary: two
-			// channels for COLOUR's crush error feedback, one for FILTERBANK's
-			// own feedback, and three stereo pairs holding each stage's OUTPUT
-			// from the previous block.
+			// SynthDef is allowed, down in COLOUR's crush. One LocalIn/
+			// LocalOut pair is all a SynthDef gets, so this one carries
+			// everything that has to cross a block boundary - which today is
+			// just COLOUR's two crush error feedback channels. RESONATOR used
+			// to carry a third channel here for its own FEEDBACK control;
+			// Rings has no such knob, and DAMPING alone gets a bank or a
+			// string close enough to self-sustaining without regenerating
+			// through a block-delayed loop, so the channel is gone with it.
 			//
-			// Those last three are what make reordering possible at all. An SC
-			// graph is acyclic and evaluated in a fixed order, so a stage
-			// cannot read something computed after it. Reading it one block
-			// late can. Every stage-to-stage hop therefore costs one control
-			// block - about 1.3 ms at 48 kHz, under half a metre of air -
-			// whichever direction it goes, which is worth it for the
-			// uniformity: no order is a special case.
-			// Three channels, not nine. Six of them were the stage taps TRIQ
-			// needed to read a stage's output one block late so the boxes
-			// could be reordered - and they were held live across the ENTIRE
-			// graph, six interconnect buffers that nothing else could use.
-			// Dropping reordering handed those back, and they are what pays
-			// for the routing above.
-			plfb = LocalIn.ar(3);
+			// Reading a value one block late - about 1.3 ms at 48 kHz, under
+			// half a metre of air - is what a stage-to-stage feedback hop
+			// costs here, whichever direction it goes: an SC graph is acyclic
+			// and evaluated in a fixed order, so nothing can read something
+			// computed after it within the same block.
+			plfb = LocalIn.ar(2);
 			fb = plfb[0..1];
-			pfbin = plfb[2];
 
 			// fixed detune table, in octaves. A table rather than a random UGen
 			// so anything using it is stable and repeatable.
@@ -638,7 +637,7 @@ Engine_Pappus : CroneEngine {
 				// nothing changes at all, so no existing patch gets quieter.
 				// Above it, SIZE becomes what it should have been all along -
 				// a control over texture that leaves the level alone, the same
-				// principle FILTERBANK's WIDTH and PARTIALS already follow.
+				// principle RESONATOR's own constant-power normalisation follows.
 				// Clipped at forty, not left to run: the natural gain stops
 				// climbing once the grain slots run out (GrainBuf holds
 				// sixteen), measured at about +13 dB and flat from there. An
@@ -721,32 +720,21 @@ Engine_Pappus : CroneEngine {
 			mt2 = Amplitude.kr((gsum2[0] + gsum2[1]) * 0.5, 0.01, 0.2);
 
 			// =============================================================
-			// FILTERBANK - a morphing resonant filterbank
+			// RESONATOR - a Rings-style modal/string resonator
 			//
-			// Forty-eight resonators, tuned to the chord the grains are
-			// playing: six partials on each of the eight voices. It replaces a
-			// spectral resynthesiser that analysed the input with sixteen
-			// zero-crossing counters and rebuilt it with sixteen oscillators.
-			// That was accurate and it was unmusical - the counters land
-			// wherever the loudest thing in a band happens to be, which for a
-			// grain cloud is nowhere in particular, so the output was a bank of
-			// oscillators on frequencies with no relationship to the notes
-			// being played.
+			// MODAL is forty-eight resonators tuned to the chord the grains
+			// are playing (or FREQUENCY, in FREE/SCALE): six partials on each
+			// of the eight voices, exactly the bank FILTERBANK used to run.
+			// STRING is eight Karplus-Strong voices, one per grain voice, fed
+			// the SAME shared excitation - a comb, like a resonant filter,
+			// only rings at the frequency it is tuned to, so one exciter and
+			// eight frequency-selective feedback loops works the same way
+			// DynKlank's one-exciter-many-resonators design already does. The
+			// two run together and cross-fade on MODE.
 			//
-			// A resonator bank cannot do that. It has no opinion about what is
-			// in the input; it rings at frequencies IT is tuned to, and the
-			// input only decides how hard. Tune it to the chord and everything
-			// it does is in key, whatever you feed it.
-			//
-			// Two DynKlanks rather than forty-eight Ringz. One UGen holds a
-			// whole bank, so the wire cost is an input and an output instead of
-			// one live signal per resonator - and the odd partials going to the
-			// left bank and the even to the right gives the stereo image for
-			// free, the same interleave the old version panned by hand.
-			//
-			// RESONANCE is the ring time, and it is the whole character
-			// control: short is a bank of bandpasses colouring the signal,
-			// long is a bank of struck bars.
+			// DAMPING is the ring time in both models, and it is the whole
+			// character control: short is a bank of bandpasses colouring the
+			// signal, long is a bank of struck bars or a string left to ring.
 
 
 			// FEED. How much of each granulator enters one point in the
@@ -768,69 +756,91 @@ Engine_Pappus : CroneEngine {
 
 			pin = gfeed.value(pin1, pin2);
 			pmono = (pin[0] + pin[1]) * 0.5;
-			// FEEDBACK, squared. Linear in the knob puts the whole useful
-			// range in the top tenth; squaring spreads it out. Into a bank of
-			// resonators this is a regeneration control - it is what turns a
-			// struck sound into a sustained one.
-			pana = pmono
-				+ (pfbin * Lag.kr(pfb, lagt).clip(0, 1).squared * 1.6);
-			// the low resonators would otherwise just thump on the DC and
-			// rumble a grain cloud carries
-			pana = HPF.ar(pana, 35);
 
-			// RING TIME: 3 ms to 2.7 s. Exponential, because everything
+			// EXCITATION. GRAIN blends filtered, envelope-following noise -
+			// Mutable Elements' "blow" character - into the shared excitation
+			// ahead of BRIGHTNESS's own filter, so the noise gets exactly the
+			// same tonal shaping the grains do.
+			pnoiz = BPF.ar(WhiteNoise.ar(1), 2200, 0.5)
+				* Amplitude.ar(pmono, 0.005, 0.1).max(0.04)
+				* Lag.kr(pgrain, lagt).clip(0, 1) * 3;
+			pana = pmono + pnoiz;
+			// the low resonators/strings would otherwise just thump on the DC
+			// and rumble a grain cloud carries
+			pana = HPF.ar(pana, 35);
+			// BRIGHTNESS, the primary mechanism: a low-pass filter on the
+			// exciter itself, closed and dark at the bottom of the knob and
+			// fully open at the top - the same thing Rings' own BRIGHTNESS
+			// does first, before it touches either resonator model.
+			pbrhz = 300 * (53 ** Lag.kr(pbright, lagt).clip(0, 1));
+			pana = LPF.ar(pana, pbrhz);
+
+			// DAMPING: 3 ms to 2.7 s. Exponential, because everything
 			// interesting about a resonator happens in the first tenth of the
 			// knob and the last tenth has to reach "still ringing".
-			prng = 0.003 * (900 ** Lag.kr(preso, lagt).clip(0, 1));
+			prng = 0.003 * (900 ** Lag.kr(pdamp, lagt).clip(0, 1));
 
-			// Odd resonators left, even right. Lagged because Lua sends the
-			// layout in steps - on the SLICE grid, or once a frame at CONT -
-			// and an un-lagged jump in a resonator's frequency is a click.
+			// ---- MODAL ----
+			// Odd resonators left, even right, same bank FILTERBANK ran.
+			// STRUCTURE and POSITION are already baked into pfrq/pamp in Lua,
+			// so this half of the graph is unchanged from before.
 			pones = Array.fill(24, 1);
 			pfl = Array.fill(24, { arg i; Lag.kr(pfrq[i * 2], 0.012) });
 			pfr = Array.fill(24, { arg i; Lag.kr(pfrq[(i * 2) + 1], 0.012) });
 			pal = Array.fill(24, { arg i; Lag.kr(pamp[i * 2], 0.03) });
 			par = Array.fill(24, { arg i; Lag.kr(pamp[(i * 2) + 1], 0.03) });
-			fsum = [
+			fmodal = [
 				DynKlank.ar(`[pfl, pal, pones], pana, 1, 0, prng),
 				DynKlank.ar(`[pfr, par, pones], pana, 1, 0, prng)
 			];
-			// RESONANCE would otherwise be a volume knob as well as a
-			// character one. Not by much, though, and that is worth writing
-			// down: a longer ring holds more energy but a narrower band lets
-			// less in, and the two very nearly cancel. Measured across the
-			// knob the raw bank moves under 4 dB, so the correction is a
-			// twelfth power, not a square root - which is what was here first
-			// and it over-corrected by 7 dB.
-			fsum = fsum * (0.076 / ((1 + (prng * 12)) ** 0.12));
+			// DAMPING would otherwise be a volume knob as well as a character
+			// one, the same correction FILTERBANK's RESONANCE always needed:
+			// a longer ring holds more energy but a narrower band lets less
+			// in, and the two very nearly cancel, to a measured twelfth power.
+			fmodal = fmodal * (0.076 / ((1 + (prng * 12)) ** 0.12));
 
-			// SHAPE, on the way OUT rather than on the way in. Driving the
-			// input just gives the bank more to ring on, which is a subtler
-			// thing; folding the ringing itself is what makes it read as an
-			// oscillator being shaped rather than a filter being pushed.
-			//   SOFT  tanh, the gentle one - thickens and rounds
-			//   FOLD  the wavefolder, which adds partials that are not in the
-			//         bank at all and is where the metallic edge comes from
-			//   WRAP  hard wrap, brutal and buzzy
-			psh = Lag.kr(pshape, lagt).clip(0, 1);
-			pdrv = 1 + (psh * 14);
-			fsum = fsum * pdrv;
-			fsum = [
-				Select.ar(pshapemode - 1,
-					[fsum[0].tanh, fsum[0].fold2(1), fsum[0].wrap2(1)]),
-				Select.ar(pshapemode - 1,
-					[fsum[1].tanh, fsum[1].fold2(1), fsum[1].wrap2(1)])
-			];
-			fsum = LeakDC.ar(fsum) / (1 + (psh * 3.5));
+			// ---- STRING ----
+			// Eight Karplus-Strong voices, one per grain voice rather than
+			// one per partial - a string does not have discrete Lua-computed
+			// partials the way the modal bank does.
+			svfrq = Array.fill(8, { arg i; Lag.kr(pvfrq[i].clip(20, 8000), 0.012) });
+			svamp = Array.fill(8, { arg i; Lag.kr(pvamp[i], 0.03) });
+			// DAMPING again, fit separately for CombL's own decay curve.
+			sdec = 0.05 * (200 ** Lag.kr(pdamp, lagt).clip(0, 1));
+			// STRUCTURE: a second, detuned comb per voice mixed in lightly -
+			// dispersion/inharmonicity, the way a stiff real string detunes
+			// its own upper partials.
+			sdet = 1 + (Lag.kr(pstruct, lagt).clip(-1, 1) * 0.06);
+			// POSITION: the classic Karplus-Strong pick-position notch,
+			// cutting whatever in the excitation would land on a node at that
+			// point on THIS voice's own string - so it happens per voice, not
+			// once on the shared signal.
+			spos = Lag.kr(ppos, lagt).clip(0, 1);
+			fstring = DC.ar([0, 0]);
+			8.do { arg i;
+				var period = 1 / svfrq[i];
+				var exc = pana - DelayC.ar(pana, 0.06, spos * period);
+				var voice = CombL.ar(exc, 0.06, period, sdec)
+					+ (CombL.ar(exc, 0.06, period * sdet, sdec) * 0.35);
+				fstring = fstring + Pan2.ar(voice * svamp[i], (i - 3.5) / 3.5 * 0.7);
+			};
+			fstring = fstring * (0.6 / ((1 + (sdec * 3)) ** 0.3));
+
+			// ---- MODE crossfade ----
+			// Equal-power, same law as WET below. Both banks run all the
+			// time - the SynthDef's topology is fixed at compile time, so
+			// nothing is actually free either way - and MODE just decides
+			// which one you hear.
+			mfade = Lag.kr(pmodel - 1, lagt).clip(0, 1) * 0.5pi;
+			fsum = (fmodal * mfade.cos) + (fstring * mfade.sin);
 
 			// A LIMITER ON THE BANK, hidden, with no control of its own.
 			//
-			// Forty-eight resonators with a long RING and FEEDBACK up is a
-			// regenerating system: it can climb tens of decibels above
-			// anything the input suggests, and it does it slowly enough that
-			// the first thing you notice is the master limiter pumping on
-			// everything else. Catching it HERE means FILTERBANK cannot flatten
-			// the rest of the chain to save itself.
+			// A long DAMPING is a near-regenerating system in either model:
+			// it can climb well above anything the input suggests, slowly
+			// enough that the first thing you notice is the master limiter
+			// pumping on everything else. Catching it HERE means RESONATOR
+			// cannot flatten the rest of the chain to save itself.
 			//
 			// 0.9 rather than the master's 0.944, and 20 ms of lookahead
 			// rather than 10: this one is holding down a resonant tail, not
@@ -838,8 +848,6 @@ Engine_Pappus : CroneEngine {
 			// Below that ceiling it is inert, which is where the bank spends
 			// almost all of its time.
 			fsum = Limiter.ar(fsum, 0.9, 0.02);
-
-			pfbout = ((fsum[0] + fsum[1]) * 0.5).tanh;
 
 			// =============================================================
 			// SIGNAL, part one - the GRAINSWARM fader and the send tap
@@ -857,7 +865,7 @@ Engine_Pappus : CroneEngine {
 			// top; it existed back when the granulator had one output and
 			// getting a dry signal past a stage meant asking the stage to do
 			// it. SIGNAL's feeds do that properly now - a granulator that
-			// should skip FILTERBANK simply is not fed into it - so SEND was a
+			// should skip RESONATOR simply is not fed into it - so SEND was a
 			// second, worse way to say the same thing, and two mechanisms for
 			// one job is how a routing page stops being readable.
 			fmix = (fwt * 0.5pi).cos;
@@ -879,7 +887,7 @@ Engine_Pappus : CroneEngine {
 			// has been coloured N times. That is what makes a delay decay
 			// rather than just repeat.
 			// =============================================================
-			// FILTERBANK's output, plus whatever joins the chain at this point.
+			// RESONATOR's output, plus whatever joins the chain at this point.
 			// A serial chain with injections rather than a tap selector: the
 			// signal always flows forwards, and the only question is where
 			// each granulator gets on.
@@ -953,7 +961,7 @@ Engine_Pappus : CroneEngine {
 				XFade2.ar(wetsig[c], x, (Lag.kr(sdiffuse, lagt) * 2) - 1);
 			});
 
-			// Same two-gain trick as FILTERBANK, and MIX only for the same reason.
+			// Same two-gain trick as RESONATOR, and MIX only for the same reason.
 			smix = Lag.kr(swet, lagt).clip(0, 1);
 			ssend = (smix * 0.5pi).cos;
 			ssig = (sdry * ssend) + (wetsig * (smix * 0.5pi).sin);
@@ -1230,10 +1238,10 @@ Engine_Pappus : CroneEngine {
 				Select.ar(bypass, [outsig[1], in[1]])
 			];
 
-			// Everything that has to cross a block boundary, written once. A
-			// SynthDef gets one LocalOut and it has to sit here, after the last
-			// of the three stage taps exists.
-			LocalOut.ar(crushfb ++ [pfbout]);
+			// Everything that has to cross a block boundary, written once - a
+			// SynthDef gets one LocalOut and it has to sit here, after the
+			// last thing that reads from it exists.
+			LocalOut.ar(crushfb);
 
 			// ---- THE MIX ----
 			// COLOUR's output plus anything routed straight past everything.
@@ -1338,20 +1346,22 @@ Engine_Pappus : CroneEngine {
 		this.addCommand("mwinend", "f", { arg msg; synth.set(\mwinend, msg[1]); });
 		this.addCommand("mstrum", "f", { arg msg; synth.set(\mstrum, msg[1]); });
 
-		// FILTERBANK
+		// RESONATOR
 		//
-		// The layout arrives as two forty-eight float arrays. That is a big
-		// message to send sixty times a second and it is still the cheap
-		// option: the alternative is nine or ten scalar controls plus the
-		// whole frequency layout rebuilt in the graph, on control-rate UGens,
-		// forty-eight times over.
+		// MODAL's layout arrives as two forty-eight float arrays, STRING's
+		// as two eight float arrays - one per grain voice rather than one
+		// per partial. Big messages to send sixty times a second and still
+		// the cheap option: the alternative is the whole frequency layout
+		// rebuilt in the graph, on control-rate UGens, dozens of times over.
 		this.addCommand("pfrq", "ffffffffffffffffffffffffffffffffffffffffffffffff", { arg msg;
 			synth.setn(\pfrq, msg[1..48]);
 		});
 		this.addCommand("pamp", "ffffffffffffffffffffffffffffffffffffffffffffffff", { arg msg;
 			synth.setn(\pamp, msg[1..48]);
 		});
-		this.addCommand("preso", "f", { arg msg; synth.set(\preso, msg[1]); });
+		this.addCommand("pvfrq", "ffffffff", { arg msg; synth.setn(\pvfrq, msg[1..8]); });
+		this.addCommand("pvamp", "ffffffff", { arg msg; synth.setn(\pvamp, msg[1..8]); });
+		this.addCommand("pdamp", "f", { arg msg; synth.set(\pdamp, msg[1]); });
 
 		// SNAPSHOTS: the snapshot duck, and the buffer itself.
 		//
@@ -1474,11 +1484,11 @@ Engine_Pappus : CroneEngine {
 			var path = msg[2].asString;
 			if (File.exists(path)) { b.read(path, 0, -1, 0, false) };
 		});
-		this.addCommand("pshape", "f", { arg msg; synth.set(\pshape, msg[1]); });
-		this.addCommand("pshapemode", "i", { arg msg;
-			synth.set(\pshapemode, msg[1]);
-		});
-		this.addCommand("pfb", "f", { arg msg; synth.set(\pfb, msg[1]); });
+		this.addCommand("pbright", "f", { arg msg; synth.set(\pbright, msg[1]); });
+		this.addCommand("pstruct", "f", { arg msg; synth.set(\pstruct, msg[1]); });
+		this.addCommand("ppos", "f", { arg msg; synth.set(\ppos, msg[1]); });
+		this.addCommand("pmodel", "i", { arg msg; synth.set(\pmodel, msg[1]); });
+		this.addCommand("pgrain", "f", { arg msg; synth.set(\pgrain, msg[1]); });
 		this.addCommand("pwet", "f", { arg msg; synth.set(\pwet, msg[1]); });
 
 		// one message for all eight voices, so a grid press is a single set

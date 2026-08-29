@@ -107,7 +107,7 @@ enc(2, 4)
 check(params:get("clock_tempo") > 120,
   "E2 could not move the tempo back on an internal clock")
 
--- the transport gate must not touch anything downstream: DELAY and FILTERBANK
+-- the transport gate must not touch anything downstream: DELAY and RESONATOR
 -- keep running so their tails decay rather than being cut off
 params:set("clock_source", 2)
 clock.transport.start()

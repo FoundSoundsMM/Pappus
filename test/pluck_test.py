@@ -136,7 +136,7 @@ if __name__ == "__main__":
     for tag, label in [("k_full", "the whole chain"),
                        ("k_nostil", "DELAY out entirely"),
                        ("k_nokul", "COLOUR out"),
-                       ("k_nospec", "FILTERBANK return out"),
+                       ("k_nospec", "RESONATOR return out"),
                        ("k_gonly", "GRAINSWARM alone")]:
         report(tag, label, ref)
 

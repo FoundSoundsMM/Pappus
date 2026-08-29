@@ -16,7 +16,7 @@ Second question, separately: how does the whole chain compare to its own input?
 Unity is the target. An instrument that loses ten decibels makes every user
 reach for a gain control to get back to where they started.
 
-Third: FILTERBANK's hidden limiter. Long ring plus feedback is a regenerating
+Third: RESONATOR's hidden limiter. DAMPING maxed out is a near-regenerating
 system that can climb far above anything the input suggests; the limiter has to
 hold it without being audible when the bank is behaving.
 
@@ -76,12 +76,11 @@ def build_script():
     for v in SOS_SWEEP:
         lines.append(group("sos%02d" % round(v * 100),
                            [("limceil", 1.0), ("msos", v)]))
-    # FILTERBANK at its most regenerative, wet, with the limiter after it doing
+    # RESONATOR with DAMPING maxed out, wet, with the limiter after it doing
     # the work. Rendered twice - once as built, once with the bank's own
     # limiter opened - so the claim "it is holding something down" is measured
     # rather than asserted.
-    hot = [("limceil", 1.0), ("msos", 0.8), ("pwet", 1.0),
-           ("preso", 0.95), ("pfb", 0.85)]
+    hot = [("limceil", 1.0), ("msos", 0.8), ("pwet", 1.0), ("pdamp", 0.98)]
     lines.append(group("spettru", hot))
     return SCRIPT.replace("RENDERS", "\n".join(lines))
 
@@ -92,8 +91,7 @@ NOLIM = [("fsum = Limiter.ar(fsum, 0.9, 0.02);", "")]
 
 
 def build_nolim():
-    hot = [("limceil", 1.0), ("msos", 0.8), ("pwet", 1.0),
-           ("preso", 0.95), ("pfb", 0.85)]
+    hot = [("limceil", 1.0), ("msos", 0.8), ("pwet", 1.0), ("pdamp", 0.98)]
     return SCRIPT.replace("RENDERS", group("spettru_nolim", hot))
 
 
@@ -145,11 +143,11 @@ if __name__ == "__main__":
     _, rgr = stats("sos%02d" % round(0.8 * 100))
     print("  grains (SOS 0.80):                        %.2f dB" % db(rgr))
 
-    print("\n=== FILTERBANK, wet, long ring, feedback up ===")
+    print("\n=== RESONATOR, wet, DAMPING maxed out ===")
     p, r = stats("spettru")
     print("  peak %.3f (%.2f dB)   rms %.2f dB" % (p, db(p), db(r)))
     check(p < 1.05,
-          "FILTERBANK at full regeneration reached %.3f with the master limiter "
+          "RESONATOR at full DAMPING reached %.3f with the master limiter "
           "open, so its own limiter is not holding it" % p)
     if os.path.exists("/tmp/gn_spettru_nolim.wav"):
         pn, rn = stats("spettru_nolim")

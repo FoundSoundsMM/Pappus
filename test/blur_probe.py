@@ -16,7 +16,7 @@ import harness as H
 
 BLURS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # A CONTINUOUS cloud, not the script's default of half a grain per second.
-# At the defaults FILTERBANK is looking at near-silence most of the time, which
+# At the defaults RESONATOR is looking at near-silence most of the time, which
 # measures as enormous ripple that has nothing to do with BLUR.
 PRESETS = [("m_rate", 8), ("m_size", 1.0),
            ("p_wet", 1.0), ("s_wet", 0.0)]

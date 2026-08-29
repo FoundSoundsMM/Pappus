@@ -41,13 +41,13 @@ norns. A grid is optional — everything is reachable without one.
 
 ```
 GRAINSWARM 1 \
-              >  FILTERBANK  >  DELAY  >  COLOUR  >  out
+              >  RESONATOR  >  DELAY  >  COLOUR  >  out
 GRAINSWARM 2 /
 ```
 
 Fixed order, and **SIGNAL is the routing**. Every stage has an amount of each
 granulator fed into it — **DRY IN**, two bars in one cell, E2 for GRAINSWARM 1 and E3 for
-GRAINSWARM 2, all eight at 70% by default. A granulator entering at FILTERBANK
+GRAINSWARM 2, all eight at 70% by default. A granulator entering at RESONATOR
 flows through everything after it; one entering only at COLOUR has skipped the
 first two; one entering only at SIGNAL's **DRY IN** has skipped the lot. Turn a feed to
 zero and that granulator bypasses that module — independently of the other one.
@@ -57,7 +57,15 @@ is decided by how much is fed into it, which is one idea instead of two that
 fight. SIGNAL draws the whole thing as a wireframe with a live meter and a dB
 number on every box.
 
-FILTERBANK and DELAY are **MIX only** — SEND is gone. It held the dry at
+**RESONATOR** is a Rings-style modal/string resonator excited by the
+granulators. **FREQUENCY** locks to the grain chord, runs FREE on its own, or
+FREE quantized to the global **SCALE**; **STRUCTURE**, **BRIGHTNESS**,
+**DAMPING** and **POSITION** are the four macro controls Mutable Instruments
+Rings is built on; **MODE** switches between the MODAL bank and a
+Karplus-Strong **STRING** model, and **GRAIN**, paired with it, blends
+filtered noise into the excitation path — a Mutable Elements-style "blow".
+
+RESONATOR and DELAY are **MIX only** — SEND is gone. It held the dry at
 unity and let the wet ride on top, which mattered when a stage was the only
 way to get a dry signal past itself; SIGNAL's feeds do that properly now, and
 two mechanisms for one job is how a routing page stops being readable.
@@ -121,12 +129,12 @@ with MODNI modulating and SNAPSHOTS storing all of it.
 
 - **K2** back a page, **K3** forward, within the current lane. **Long K2** puts the selected parameter back to its default and takes any modulator off it.
 - On **SNAPSHOTS**: long **K3** saves the selected slot, long **K2** clears it, and **push E2** loads it. A load is a **reset first**: everything goes back to its default and the snapshot is applied on top, so nothing from the last patch survives into it — and **SRC always comes back OFF**, because an armed input would record straight over the audio the snapshot just loaded. E2 and E3 walk the slots (one at a time, and a row at a time).
-- **K2 and K3 together** change lane: the audio chain (both GRAINSWARMs → FILTERBANK → DELAY → COLOUR → SIGNAL → SNAPSHOTS) sits above the modulators (four MODNI LFO pages and MODNI ENV), so paging along the chain never walks you through eight LFO pages. The display wipes vertically so it is obvious which way you went.
+- **K2 and K3 together** change lane: the audio chain (both GRAINSWARMs → RESONATOR → DELAY → COLOUR → SIGNAL → SNAPSHOTS) sits above the modulators (four MODNI LFO pages and MODNI ENV), so paging along the chain never walks you through eight LFO pages. The display wipes vertically so it is obvious which way you went.
 - The encoders push, on hardware that has it: **push E1** returns the selected parameter to its default, **push E2** and **push E3** snap it to the nearest round value.
 - **Long K3** fires the page's toggle — LOCK, FREEZE, HOLD, BYPASS, DIM.
 - **E1** selects a cell, **E2** sets its value, **E3** its sub-value — or, on a cell that has no sub-value, a **fine tune**.
 - Both knobs land on **round numbers**. The grid comes from the size of the value rather than the width of the range, so a frequency knob steps in 10 Hz at 700 Hz and 1 Hz at 70; the coarse knob keeps its sweep (a percent of the travel per click) and rounds onto that grid, and the fine knob steps by exactly a tenth of it. 0.5, 700 Hz and 60.1 BPM are all reachable.
-- The last page in the audio lane is **PAPPUS**: no controls, just the sky. Every grain that fires puts one dandelion seed into it — one per *grain*, not per voice, so a held chord at 1/16 is a blizzard and a single voice at 1/1 is a seed every couple of seconds. The modules blow them about: MODNI 1 and 2 are the wind direction, WOW the swirl, NOISE the turbulence, DRIVE the spin and the ragged crowns, N.TONE the filament count, LOSS the missing filaments, CRUSH the stepping, FILTERBANK's centre how high they enter, and the grain's own pitch how big the seed is. The air empties when you leave the page.
+- The last page in the audio lane is **PAPPUS**: no controls, just the sky. Every grain that fires puts one dandelion seed into it — one per *grain*, not per voice, so a held chord at 1/16 is a blizzard and a single voice at 1/1 is a seed every couple of seconds. The modules blow them about: MODNI 1 and 2 are the wind direction, WOW the swirl, NOISE the turbulence, DRIVE the spin and the ragged crowns, N.TONE the filament count, LOSS the missing filaments, CRUSH the stepping, RESONATOR's FREQUENCY how high they enter, and the grain's own pitch how big the seed is. The air empties when you leave the page.
 - On the grid: one row per grain on either GRAINSWARM page — the page you are on decides which granulator's chord you are editing — one per tap on DELAY, one per slot on SNAPSHOTS. Hold a grain key and E2/E3 set that voice's level and probability.
 
 ## clock and transport

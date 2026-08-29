@@ -1,6 +1,6 @@
 """Does every stage actually make a sound when you turn its WET up?
 
-This exists because FILTERBANK did not. Its default SLICE is CONT, which sends
+This exists because FILTERBANK (RESONATOR's predecessor) did not. Its default SLICE is CONT, which sends
 2000 Hz; `Impulse.kr` above the control rate outputs 1 on every block and never
 returns to zero; `Latch` triggers on a RISING edge, so it saw one at time zero
 and then held its initial value - zero - for ever. The page was silent out of
@@ -56,14 +56,17 @@ RENDERS
 # (tag, label, the params:set calls that turn this stage up, through the script)
 CASES = [
     ("dry",  "nothing wet (reference)", []),
-    ("spec", "FILTERBANK wet",   [("p_wet", "1.0")]),
+    ("spec", "RESONATOR wet, MODAL",   [("p_wet", "1.0")]),
     # This was silent for two versions. A held amplitude is a held ZERO
     # whenever the latch lands between grains, which at a 4 Hz slice is most
     # of the time. SLICE now holds the PITCHES only.
-    ("specs", "FILTERBANK wet, FREE root", [("p_wet", "1.0"), ("p_root", "2")]),
-    ("specn", "FILTERBANK wet, narrow window", [("p_wet", "1.0"), ("p_bw", "0.4")]),
-    ("specq", "FILTERBANK wet, long ring", [("p_wet", "1.0"), ("p_reso", "0.9")]),
-    ("specf", "FILTERBANK wet, 2 partials", [("p_wet", "1.0"), ("p_partials", "2")]),
+    ("specs", "RESONATOR wet, FREE frequency", [("p_wet", "1.0"), ("p_freqmode", "2")]),
+    ("specn", "RESONATOR wet, dark/centred", [("p_wet", "1.0"), ("p_bright", "0.05"),
+                                               ("p_pos", "0.5")]),
+    ("specq", "RESONATOR wet, DAMPING long", [("p_wet", "1.0"), ("p_damp", "0.9")]),
+    # STRING is a whole second signal path (Karplus-Strong voices, no
+    # DynKlank at all) - it needs its own "is there a sound" check.
+    ("specf", "RESONATOR wet, STRING mode", [("p_wet", "1.0"), ("p_model", "2")]),
     ("stil", "DELAY wet",   [("s_wet", "1.0"), ("s_euclid", "0.5")]),
     ("kul",  "COLOUR wet + drive", [("drive", "0.6")]),
     ("all",  "all three wet", [("p_wet", "0.7"), ("s_wet", "0.7"),

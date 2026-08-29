@@ -116,8 +116,8 @@ step("extreme params", function()
                         "m_buflen", "m_win_start", "m_win_end", "m_strum",
                         "m_vspread",
                         "m_euclid",
-                        "p_centre", "p_bw", "p_reso", "p_fb",
-                        "p_morph", "p_skew", "p_shape", "p_wet",
+                        "p_freq", "p_structure", "p_bright", "p_damp",
+                        "p_pos", "p_grain", "p_wet",
                         "lfo1_rate", "lfo1_phase", "lfo1_a1",
                         "lfo8_rate", "lfo8_phase", "lfo8_a1",
                         "mx_in",
@@ -132,7 +132,8 @@ step("extreme params", function()
                         "m_swarm_mode", "n_swarm_mode", "n_lock", "m_lock", "bypass",
                         "m_src", "n_src",
                         "s_steps", "s_tilt_mode", "s_hold",
-                        "p_freeze", "lfo1_shape", "lfo2_shape", "s_link",
+                        "p_freeze", "p_freqmode", "p_model",
+                        "lfo1_shape", "lfo2_shape", "s_link",
                         "env_d1", "env_d2", "m_scale",
                         "mx_dim", "mod_hold", "mod_bypass" }) do
     local p = params:lookup_param(id)
@@ -401,12 +402,12 @@ end)
 step("snapshots store, load and clear", function()
   clear_toggles()
   goto_page_index(SKENI_PAGE)
-  params:set("drive", 0.2); params:set("p_bw", 0.4)
+  params:set("drive", 0.2); params:set("p_structure", 0.4)
   params:set("crush_mode", 1)
   -- hold a slot key to save
   mock.grid.key(1, 1, 1); mock.advance_time(1.0); mock.grid.key(1, 1, 0)
 
-  params:set("drive", 0.9); params:set("p_bw", 3.0)
+  params:set("drive", 0.9); params:set("p_structure", -0.7)
   params:set("crush_mode", 3)
   mock.grid.key(2, 1, 1); mock.advance_time(1.0); mock.grid.key(2, 1, 0)
 
@@ -555,7 +556,7 @@ step("every page cell is a destination", function()
   assert(#p.options > 50,
     "expected the full destination list, got " .. #p.options)
   for _, n in ipairs({ "G1.SLIDE", "G1.SIZE", "G1.RATE", "G1.BUFFR", "G1.VOICES",
-                       "F.CENTRE", "F.WIDTH", "F.RESO", "F.MORPH", "F.SKEW", "F.SHAPE",
+                       "F.FREQ", "F.STRUCT", "F.BRIGHT", "F.DAMP", "F.POSN", "F.GRAIN",
                        "D.EUCLID", "D.RATE", "C.DRIVE",
                        "G1.EUCLID", "G1.LEN", "G1.PHASE", "C.LOSS", "C.CRUSH",
                        "C.N.DEC.A", "C.WOW", "S.IN", "S.LIMIT", "G1.SHAPE",

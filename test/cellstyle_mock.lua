@@ -385,7 +385,7 @@ params:set("m_src", 2); params:set("n_src", 2)
 local function gtap(x, y) mock.grid.key(x, y, 1); mock.grid.key(x, y, 0) end
 gtap(1, 1); gtap(8, 2); gtap(13, 2); gtap(5, 3)
 params:set("m_rate", 7); params:set("m_voices", 4)
-params:set("p_wet", 0.8); params:set("p_centre", 700)
+params:set("p_wet", 0.8); params:set("p_freq", 0)
 params:set("s_feedback", 0.4); params:set("s_euclid", 0.45)
 params:set("drive", 0.62); params:set("crush", 0.3); params:set("noise", 0.45)
 params:set("noise_type", 4)
@@ -410,7 +410,7 @@ local NAMES = { [0] = "0 bar (now)", "1 value", "2 value inverted", "3 ring",
 for st = 0, 6 do
   settle(6, 0.42)
   shot(NAMES[st] .. " / COLOUR", function() frame(PG["shader"], 2, st) end)
-  shot(NAMES[st] .. " / FILTERBANK", function() frame(PG["spettru"], 3, st) end)
+  shot(NAMES[st] .. " / RESONATOR", function() frame(PG["spettru"], 3, st) end)
   shot(NAMES[st] .. " / DELAY", function() frame(PG["delay"], 1, st) end)
 end
 
