@@ -757,13 +757,17 @@ Engine_Pappus : CroneEngine {
 			pin = gfeed.value(pin1, pin2);
 			pmono = (pin[0] + pin[1]) * 0.5;
 
-			// EXCITATION. GRAIN blends filtered, envelope-following noise -
-			// Mutable Elements' "blow" character - into the shared excitation
-			// ahead of BRIGHTNESS's own filter, so the noise gets exactly the
-			// same tonal shaping the grains do.
+			// EXCITATION. GRAIN adds grit TO the signal rather than a noise
+			// layer under it - Mutable Elements' "blow" character, but strictly
+			// envelope-linked: no floor, so silence in is silence out. The
+			// follower's own attack/release are tight enough to hug individual
+			// grains rather than smoothing them into a wash, which is what makes
+			// it read as texture ON the excitation and not a second source mixed
+			// in beside it. Filtered ahead of BRIGHTNESS's own filter, so the
+			// noise gets exactly the same tonal shaping the grains do.
 			pnoiz = BPF.ar(WhiteNoise.ar(1), 2200, 0.5)
-				* Amplitude.ar(pmono, 0.005, 0.1).max(0.04)
-				* Lag.kr(pgrain, lagt).clip(0, 1) * 3;
+				* Amplitude.ar(pmono, 0.003, 0.05)
+				* Lag.kr(pgrain, lagt).clip(0, 1) * 4;
 			pana = pmono + pnoiz;
 			// the low resonators/strings would otherwise just thump on the DC
 			// and rumble a grain cloud carries

@@ -401,11 +401,11 @@ local PAGES = {
       -- one to zero and that granulator skips this module.
       { id = "p_in1", alt = "p_in2", label = "DRY IN", dual = true },
       { id = "p_freq",      label = "FREQ",   mode = "p_freqmode" },
-      { id = "p_structure", label = "STRUCT", bipolar = true },
+      { id = "p_structure", label = "STRUCT", mode = "p_model", bipolar = true },
       { id = "p_bright",    label = "BRIGHT" },
       { id = "p_damp",      label = "DAMP"   },
       { id = "p_pos",       label = "POSN"   },
-      { id = "p_grain",     label = "GRAIN",  mode = "p_model" },
+      { id = "p_grain",     label = "GRAIN"  },
       { id = "p_wet",       label = "WET"    },
     },
   },
@@ -1282,6 +1282,15 @@ local PQ_REF = 261.6256               -- C4: what a grain at semitone 0 rings
 local bank_f, bank_a = {}, {}
 for i = 1, NBAND do bank_f[i], bank_a[i] = 0, 0 end
 
+-- the visualiser's OWN amplitude, brightness only - POSITION is left out on
+-- purpose. Its |sin| weighting hits exact zero on every even partial at the
+-- centre, which reads fine as a level sent to the engine but as a picture
+-- is half the strings vanishing and reappearing as the knob moves through
+-- values near that null - it looked broken because the maths IS a hard
+-- null, not a smooth taper. The audio still gets POSITION; the eyes don't.
+local bank_ad = {}
+for i = 1, NBAND do bank_ad[i] = 0 end
+
 -- the STRING path's own eight voices - one per grain voice, not per partial
 local vbank_f, vbank_a = {}, {}
 for v = 1, NVOICE do vbank_f[v], vbank_a[v] = 0, 0 end
@@ -1325,7 +1334,10 @@ end
 -- off (a dark body has none of them, a bright one keeps them all), and
 -- POSITION is the classic mode-shape-at-the-excitation-point formula -
 -- amplitude(partial k) proportional to |sin(pi * position * k)| - the same
--- reason a string plucked at its centre loses its even harmonics.
+-- reason a string plucked at its centre loses its even harmonics. POSITION
+-- only reaches the audio array (`a`); the display array (`ad`, see below)
+-- leaves it out, because a hard null on every even partial is a picture of
+-- strings blinking in and out rather than a bank quietly rebalancing.
 function spettru_layout()
   local w = spettru_swarm()
   local G = gr(w)
@@ -1344,8 +1356,8 @@ function spettru_layout()
   local freeish = mode ~= 1
   local root_semi = freqst
   if mode == 3 then root_semi = snap_to_scale(freqst, sc) end
-  local f, a, vf, va = {}, {}, {}, {}
-  local sumsq = 0
+  local f, a, ad, vf, va = {}, {}, {}, {}, {}
+  local sumsq, sumsq_d = 0, 0
   for v = 1, NVOICE do
     local st = G[v]
     local f0
@@ -1362,14 +1374,15 @@ function spettru_layout()
       local i = ((v - 1) * NPART) + k
       local hz = util.clamp(
         f0 * spettru_ratio(freeish and i or k), 20, 16000)
-      local g = 0
+      local g, gd = 0, 0
       if st.on or freeish then
-        g = falloff ^ (k - 1)                              -- BRIGHTNESS rolloff
-        g = g * math.abs(math.sin(math.pi * pos * k))       -- POSITION mode-shape
-        g = g * (freeish and 1 or st.lvl)
+        gd = falloff ^ (k - 1)                              -- BRIGHTNESS rolloff
+        gd = gd * (freeish and 1 or st.lvl)
+        g = gd * math.abs(math.sin(math.pi * pos * k))      -- POSITION mode-shape
         sumsq = sumsq + (g * g)
+        sumsq_d = sumsq_d + (gd * gd)
       end
-      f[i], a[i] = hz, g
+      f[i], a[i], ad[i] = hz, g, gd
     end
   end
   -- Normalise the bank to constant total POWER, not to a count of lit
@@ -1378,22 +1391,29 @@ function spettru_layout()
   -- dividing by sqrt(count) made a dark bank quiet and a bright one loud.
   -- Scaling so the sum of squares is one makes both level-neutral, which is
   -- what you want from controls that are about balance rather than volume.
+  -- The display array is normalised SEPARATELY, on its own sum - it never
+  -- saw POSITION's zeros, so its own power is a different number and
+  -- sharing the audio normaliser would just reintroduce the nulls sideways.
   if sumsq > 1e-9 then
     local norm = 1 / math.sqrt(sumsq)
     for i = 1, NBAND do a[i] = util.clamp(a[i] * norm, 0, 1) end
   end
-  return f, a, vf, va
+  if sumsq_d > 1e-9 then
+    local normd = 1 / math.sqrt(sumsq_d)
+    for i = 1, NBAND do ad[i] = util.clamp(ad[i] * normd, 0, 1) end
+  end
+  return f, a, ad, vf, va
 end
 
 function send_bank(force)
-  local f, a, vf, va = spettru_layout()
+  local f, a, ad, vf, va = spettru_layout()
   local changed = force and true or false
   for i = 1, NBAND do
     if math.abs(f[i] - bank_f[i]) > 0.02
       or math.abs(a[i] - bank_a[i]) > 0.0008 then
       changed = true
     end
-    bank_f[i], bank_a[i] = f[i], a[i]
+    bank_f[i], bank_a[i], bank_ad[i] = f[i], a[i], ad[i]
   end
   for v = 1, NVOICE do
     if math.abs(vf[v] - vbank_f[v]) > 0.02
@@ -1425,8 +1445,9 @@ function spettru_band_hz(i)
   return bank_f[i]
 end
 
+-- the visualiser's own reading - see bank_ad above: everything but POSITION
 function spettru_band_amp(i)
-  return bank_a[i]
+  return bank_ad[i]
 end
 
 -- ---------------------------------------------------------------------------
@@ -2429,6 +2450,7 @@ local function add_params()
   -- STRUCTURE stretches the partial series - harmonic at zero, stretched
   -- towards bell above it, compressed towards gong below - and, in STRING,
   -- detunes a second comb per voice for the same "stiffer string" idea.
+  -- MODE, paired with it, picks which resonator model STRUCTURE is shaping.
   params:add_control("p_structure", "spettru structure",
     controlspec.new(-1, 1, "lin", 0, 0, ""))
   params:set_action("p_structure", function(x)
@@ -2464,11 +2486,13 @@ local function add_params()
     send_bank(true)
   end)
 
-  -- MODE picks the resonator model; GRAIN, paired with it, blends filtered
-  -- noise into the excitation path - Mutable Elements' "blow" character.
   params:add_option("p_model", "spettru model", { "MODAL", "STRING" }, 1)
   params:set_action("p_model", function(x) engine.pmodel(x) end)
 
+  -- GRAIN rides the exciter's OWN envelope rather than hissing on its own -
+  -- noise scaled by how loud the grains are right now, so it reads as grit
+  -- ON the signal, not a separate breath layer under it. Silence in, silence
+  -- out. Mutable Elements' "blow" character, but strictly excitation-linked.
   params:add_control("p_grain", "spettru grain",
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("p_grain", function(x) engine.pgrain(x) end)

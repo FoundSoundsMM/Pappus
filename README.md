@@ -61,9 +61,10 @@ number on every box.
 granulators. **FREQUENCY** locks to the grain chord, runs FREE on its own, or
 FREE quantized to the global **SCALE**; **STRUCTURE**, **BRIGHTNESS**,
 **DAMPING** and **POSITION** are the four macro controls Mutable Instruments
-Rings is built on; **MODE** switches between the MODAL bank and a
-Karplus-Strong **STRING** model, and **GRAIN**, paired with it, blends
-filtered noise into the excitation path — a Mutable Elements-style "blow".
+Rings is built on. **MODE**, paired with STRUCTURE, switches between the
+MODAL bank and a Karplus-Strong **STRING** model. **GRAIN** rides the
+excitation's own envelope to add grit to the signal — silence in, silence
+out — a Mutable Elements-style "blow" that never hisses on its own.
 
 RESONATOR and DELAY are **MIX only** — SEND is gone. It held the dry at
 unity and let the wet ride on top, which mattered when a stage was the only
