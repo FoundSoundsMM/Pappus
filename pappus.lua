@@ -5166,10 +5166,11 @@ function draw_spettru()
     if f > 20 and g > 0.0005 then
       local r = sring[i]
       local x = freq_x(f)
-      -- the visual pitch: 1.5 Hz at the bottom of the axis, 7 at the top.
-      -- Slow enough to read at twenty-five frames a second.
+      -- the visual pitch: 0.8 Hz at the bottom of the axis, 3.5 at the top.
+      -- Slow enough to read at twenty-five frames a second without the
+      -- per-frame phase step turning into a flicker.
       local u = util.clamp((x - 2) / 123, 0, 1)
-      local vf = 1.5 + (u * 5.5)
+      local vf = 0.8 + (u * 2.7)
       -- how far it bows, in pixels. Forty-eight strings across 123 pixels
       -- sit about two and a half apart, so five is a wide swing without the
       -- picture turning to soup.
