@@ -7,9 +7,6 @@ colour + scene morphing, with modular routing and modulation.
 
 A very deep sound design tool and soundscape instrument.
 
-**SRC picks each grainswarmer's input and starts OFF**, so select an input to
-hear something. **SOS at max freezes the buffer.**
-
 ```
 K2 back                  K3 forward
 K2 & K3                  change lane
@@ -23,7 +20,7 @@ Grid compatible (see below).
 
 Designed by Michael Manning. Inspired by Torso S-4.
 
-Heavy LLM usage. 100% Claude code.
+Heavy LLM usage disclaimer. 100% Claude code.
 
 ---
 
@@ -45,55 +42,6 @@ GRAINSWARM 1 \
 GRAINSWARM 2 /
 ```
 
-Fixed order, and **SIGNAL is the routing**. Every stage has an amount of each
-granulator fed into it — **DRY IN**, two bars in one cell, E2 for GRAINSWARM 1 and E3 for
-GRAINSWARM 2, all eight at 70% by default. A granulator entering at RESONATOR
-flows through everything after it; one entering only at COLOUR has skipped the
-first two; one entering only at SIGNAL's **DRY IN** has skipped the lot. Turn a feed to
-zero and that granulator bypasses that module — independently of the other one.
-
-There are no module faders and no reordering: how loud a module is in the mix
-is decided by how much is fed into it, which is one idea instead of two that
-fight. SIGNAL draws the whole thing as a wireframe with a live meter and a dB
-number on every box.
-
-**REVERB** sits on SIGNAL itself, ahead of COMP. **AMOUNT** is one knob for
-wet, size and decay together — zero is a true bypass, one is a huge, slowly
-decaying tank. **SHIFT** is a shimmer send: some of the tail is pitch shifted
-up and returned into the tank, so a held chord keeps climbing rather than
-only decaying. Its **MODE** picks the interval — an octave, a fifth, or the
-current SCALE's own nearest fifth.
-
-**RESONATOR** is a Rings-style modal/string resonator excited by the
-granulators. **FREQUENCY** locks to the grain chord, runs FREE on its own, or
-FREE quantized to the global **SCALE**; **STRUCTURE**, **BRIGHTNESS**,
-**DAMPING** and **POSITION** are the four macro controls Mutable Instruments
-Rings is built on. **MODE**, paired with STRUCTURE, switches between the
-MODAL bank and a Karplus-Strong **STRING** model. **GRAIN** rides the
-excitation's own envelope to add grit to the signal — silence in, silence
-out — a Mutable Elements-style "blow" that never hisses on its own.
-
-RESONATOR and DELAY are **MIX only** — SEND is gone. It held the dry at
-unity and let the wet ride on top, which mattered when a stage was the only
-way to get a dry signal past itself; SIGNAL's feeds do that properly now, and
-two mechanisms for one job is how a routing page stops being readable.
-
-Master is **mixer → REVERB → COMP → limiter**, and nothing else. There used to be a
-hidden mastering stage — expander, saturation, width, tape wobble — which
-measured well on a grain cloud and buffeted audibly on a clean signal passed
-straight through. A stage nobody can turn off has to be right for every signal
-that can reach it.
-
-GRAINSWARM 1 is the parent: **SCALE** is one setting for both, and GRAINSWARM
-2's **RATE** is a ratio of GRAINSWARM 1's. A small chain mark says so.
-
-### the capture is stereo
-
-Each granulator records into **two mono buffers**, left and right, because
-`GrainBuf` reads a mono buffer — "the buffer holding a mono audio signal",
-says its own help — and handing it a two-channel one reads the interleave as
-if it were a waveform. So **SRC** is:
-
 ```
 STEREO     left to the left buffer, right to the right, kept apart
 MONO L     the left input, written to BOTH buffers
@@ -104,20 +52,6 @@ A mono source is not "stereo with one side missing": it goes to both sides so
 the grains arrive centred rather than stacked against one speaker. STEREO with
 a lead in one socket really is one-sided, which is what stereo means.
 
-The cost is one extra interpolated buffer read per voice: the **main** grain is
-read twice, once per side, and balanced by SPRAY rather than panned. The
-**SWARM duplicates are free** — there were always two of them, so one is
-pointed at each side, and the pair costs exactly what it did before while
-carrying both. With a mono source both buffers hold the same samples and every
-level in the instrument comes out where it always did.
-
-Measured through the whole grain engine: a 300 Hz tone in the left input and a
-3 kHz tone in the right come out 76 dB low-heavy on the left and 61 dB
-high-heavy on the right (`test/src_test.py`).
-
-**MODNI ENV** has its own **SRC** cell, and it is a follower rather than a
-capture, so it sums where the granulators keep apart:
-
 ```
 OUT        the master output, after everything (the default)
 GS1 / GS2  either granulator's own output
@@ -125,14 +59,6 @@ IN L+R     both inputs, averaged
 LEFT       the left input only
 RIGHT      the right input only
 ```
-
-OUT is right for ducking something against the whole chain; the input sources
-are what you want for playing something in, since an envelope taken from the
-output of a chain that is already reacting to the input is a feedback loop
-with a delay in it.
-
-with MODNI modulating and SNAPSHOTS storing all of it.
-
 ## controls
 
 - **K2** back a page, **K3** forward, within the current lane. **Long K2** puts the selected parameter back to its default and takes any modulator off it.
