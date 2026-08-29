@@ -13,6 +13,7 @@
 
 Engine_Pappus : CroneEngine {
 	var <synth, <buf, <bufr, <buf2, <buf2r, <dbuf, <envbufs, <patbuf, <patbuf2, <mbus;
+	var <rainbuf, <pinebuf, <seabuf;
 	var bufdur = 60.0;
 	var deldur = 11.0;
 
@@ -77,6 +78,24 @@ Engine_Pappus : CroneEngine {
 		// the feedback path mono is what stops the image wandering as it
 		// regenerates.
 		dbuf = Buffer.alloc(srv, (deldur * srv.sampleRate).asInteger, 1);
+
+		// NOISE's loop sources: RAIN, PINE and SEA, read once from disk
+		// rather than synthesised. They live in audio/ next to this class
+		// file's own directory, so the path is built from where THIS file
+		// is rather than assumed - the class still finds its samples
+		// however the script got installed. Their peaks are pre-matched in
+		// the files themselves (there is no cheap way to do it on the
+		// server after the fact), so this read is just a read.
+		rainbuf = Buffer.read(srv,
+			PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
+				++ "../audio/rain.wav");
+		pinebuf = Buffer.read(srv,
+			PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
+				++ "../audio/pine.wav");
+		seabuf = Buffer.read(srv,
+			PathName(Engine_Pappus.filenameSymbol.asString).pathOnly
+				++ "../audio/sea.wav");
+		srv.sync;
 
 		// EUCLID's gate pattern, sixteen steps. Starts all-open, which is what
 		// EUCLID off means; Lua runs Bjorklund and overwrites it whenever the
@@ -241,8 +260,9 @@ Engine_Pappus : CroneEngine {
 			var dgain, dbias, dx, dy, mk;
 			var bits, q, fb, pre, bc, jit, sr, rd, br, crushed, crushfb, kout;
 			var lmono, lchain, lthr, lossmono, ldry, lossed, lmix;
-			var lo, hi, nwhite, npink, ndust, nz;
-			var nres, nexc, nf0, nsel, nring, nrat, nbamp, nbank;
+			var lo, hi, nwhite, npink, ndust, nwash, nz;
+			var nres, nlp, nexc, nf0, nsel, nring, nrat, nbamp, nbank;
+			var nloopsel, nlooprate, nrain, npine, nsea, nloop;
 			var mixed, sent, outsig;
 			var mt1, mt2, mt3, mt4, mt5, mt6;
 
@@ -1122,11 +1142,12 @@ Engine_Pappus : CroneEngine {
 
 			// ---- NOISE ----
 			//
-			// Six sources, and the last three are not noise at all. WHITE,
-			// PINK and DUST are the raw ones; BELL, GLASS and PLUCK are a
-			// six-partial resonator bank STRUCK by the dust, which turns the
-			// same envelope-following sputter into struck metal, tapped glass
-			// or a plucked string depending only on how the bank is tuned.
+			// Nine sources in three groups of three. WHITE, PINK and DUST are
+			// raw washes; RAIN, PINE and SEA are looped field recordings; BELL,
+			// GLASS and PLUCK are a six-partial resonator bank STRUCK by the
+			// dust, which turns the same envelope-following sputter into
+			// struck metal, tapped glass or a plucked string depending only on
+			// how the bank is tuned.
 			//
 			// One bank, not three. The partial ratios and the ring time are
 			// chosen at CONTROL rate, so the three characters cost three
@@ -1148,15 +1169,41 @@ Engine_Pappus : CroneEngine {
 			nwhite = { WhiteNoise.ar(1) } ! 2;
 			npink = { PinkNoise.ar(1.6) } ! 2;
 			ndust = { Dust2.ar(1800) } ! 2;
-			nz = [
+			nwash = [
 				Select.ar((noisetype - 1).clip(0, 2),
 					[nwhite[0], npink[0], ndust[0]]),
 				Select.ar((noisetype - 1).clip(0, 2),
 					[nwhite[1], npink[1], ndust[1]])
 			];
 
-			// resonant or not, decided once at control rate
-			nres = Lag.kr(noisetype > 3.5, 0.05);
+			// RAIN, PINE and SEA - the same slot WHITE/PINK/DUST fill, but
+			// read off disk once at alloc rather than generated. N.TONE is
+			// not a filter here: it re-times the loop, exactly as it is a
+			// FUNDAMENTAL for the resonant three rather than a filter centre.
+			// 1200 Hz, the knob's resting value, plays each loop at its own
+			// recorded speed; turning it down slows and drops the loop,
+			// turning it up speeds it up and raises it.
+			nloopsel = (noisetype - 4).clip(0, 2);
+			nlooprate = Lag.kr(noisetone, 0.05) / 1200;
+			nrain = PlayBuf.ar(2, rainbuf.bufnum,
+				nlooprate * BufRateScale.kr(rainbuf.bufnum), loop: 1);
+			npine = PlayBuf.ar(2, pinebuf.bufnum,
+				nlooprate * BufRateScale.kr(pinebuf.bufnum), loop: 1);
+			nsea = PlayBuf.ar(2, seabuf.bufnum,
+				nlooprate * BufRateScale.kr(seabuf.bufnum), loop: 1);
+			nloop = [
+				Select.ar(nloopsel, [nrain[0], npine[0], nsea[0]]),
+				Select.ar(nloopsel, [nrain[1], npine[1], nsea[1]])
+			];
+			// Unmeasured, unlike the bank below - normalised recordings still
+			// run far hotter in RMS than a synthesised wash at the same peak,
+			// so pulled well back by ear. Revisit if one source dominates.
+			nloop = nloop * 0.35;
+
+			// which of the three groups is live, each smoothed on its own so
+			// switching between any two of them crossfades rather than jumps
+			nres = Lag.kr(noisetype > 6.5, 0.05);
+			nlp = Lag.kr((noisetype > 3.5) * (noisetype < 6.5), 0.05);
 
 			// The excitation for the bank is always DUST - a resonator wants
 			// hits, not a wash. Density rides on N.DEC so the same knob that
@@ -1169,7 +1216,7 @@ Engine_Pappus : CroneEngine {
 			// can be: twelve kilohertz is a sensible top for a band-pass and
 			// an absurd one for a struck bell.
 			nf0 = Lag.kr(noisetone, 0.05).clip(60, 2000);
-			nsel = (noisetype - 4).clip(0, 2);
+			nsel = (noisetype - 7).clip(0, 2);
 			nring = Select.kr(nsel, [2.6, 0.7, 0.11]);
 			nrat = [
 				Select.kr(nsel, [1, 1, 1]),
@@ -1222,9 +1269,11 @@ Engine_Pappus : CroneEngine {
 			// not sit in a point in the middle of the image
 			nbank = Pan2.ar(nbank, LFNoise2.kr(0.13) * 0.6);
 
-			// the raw noises are band-passed; the bank is not - it IS a filter
-			nz = BPF.ar(nz, Lag.kr(noisetone, lagt).clip(60, 12000), 0.8) * 2.5;
-			nz = (nz * (1 - nres)) + (nbank * nres);
+			// the raw noises are band-passed; the loops are re-timed instead
+			// (above); the bank is neither - it IS a filter
+			nwash = BPF.ar(nwash, Lag.kr(noisetone, lagt).clip(60, 12000), 0.8)
+				* 2.5;
+			nz = (nwash * (1 - nres - nlp)) + (nloop * nlp) + (nbank * nres);
 			sig = sig + (nz * env * ns * 4);
 
 			// ---- OUT ----
@@ -1469,6 +1518,14 @@ Engine_Pappus : CroneEngine {
 		// whatever the last one happened to leave in there
 		this.addCommand("bufclear", "i", { arg msg;
 			buf.zero; bufr.zero; buf2.zero; buf2r.zero;
+		});
+		// wipe DELAY's own buffer - the feedback line reads and writes it
+		// continuously regardless of the output fade, so a snapshot recall
+		// that only mutes the output still hands the new snapshot a delay
+		// line full of the old one's repeats. Zeroing it is what makes a
+		// silent recall actually silent, not just muted.
+		this.addCommand("delayclear", "i", { arg msg;
+			dbuf.zero;
 		});
 		// SNAPSHOT I/O, addressed by buffer: 1 and 2 are GRAINSWARM 1's left
 		// and right, 3 and 4 are GRAINSWARM 2's. Four files rather than two,

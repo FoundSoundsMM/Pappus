@@ -46,7 +46,7 @@ PRESETS = [("m_rate", 8), ("m_size", 0.25), ("m_src", 2), ("m_sos", 0.0),
            ("noise_dyn", 2), ("drive", 0.0), ("crush", 0.0), ("loss", 0.0)]
 
 TYPES = [("white", 1), ("pink", 2), ("dust", 3),
-         ("bell", 4), ("glass", 5), ("pluck", 6)]
+         ("bell", 7), ("glass", 8), ("pluck", 9)]
 
 SCRIPT = r'''
 ~render = { arg path, args, setns;

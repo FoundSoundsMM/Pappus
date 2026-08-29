@@ -2625,14 +2625,18 @@ local function add_params()
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("noise", function(x) engine.noise(x) end)
 
-  -- Six, and the last three are not noise. BELL, GLASS and PLUCK strike a
-  -- six-partial resonator bank with the same dust the others wash with, so
-  -- the envelope follower that used to sputter now rings: struck metal on
+  -- Nine, in three groups of three. WHITE, PINK and DUST are washes; RAIN,
+  -- PINE and SEA are looped field recordings, where N.TONE re-times the
+  -- loop rather than filtering it - turn it down and the loop slows and
+  -- drops, turn it up and it speeds up and rises, 1200Hz being each loop's
+  -- own recorded speed. BELL, GLASS and PLUCK strike a six-partial
+  -- resonator bank with the same dust the others wash with, so the
+  -- envelope follower that used to sputter now rings: struck metal on
   -- BELL, tapped glass on GLASS, and on PLUCK something close to a synth
   -- string. N.TONE is the fundamental for all three rather than a filter
   -- centre, and N.DEC still sets how busy the striking is.
   params:add_option("noise_type", "noise type",
-    { "WHITE", "PINK", "DUST", "BELL", "GLASS", "PLUCK" }, 2)
+    { "WHITE", "PINK", "DUST", "RAIN", "PINE", "SEA", "BELL", "GLASS", "PLUCK" }, 2)
   params:set_action("noise_type", function(x) engine.noisetype(x) end)
 
   params:add_control("noise_decay", "noise decay",
@@ -3414,6 +3418,13 @@ function snap_recall(n)
 
     -- everything, in silence: the audio in both buffers, every parameter,
     -- both chords, the taps and the stored waveform pictures
+    --
+    -- DELAY's feedback line is not part of that - it reads and writes its
+    -- buffer continuously regardless of the output fade, so left alone it
+    -- would hand the new snapshot a line still full of the old one's
+    -- repeats. Zeroed here, in the same silence, so what carries forward is
+    -- only what the snapshot itself put there.
+    engine.delayclear(1)
     if sc then
       -- An OLD snapshot has one file per granulator, from when the capture
       -- was mono. It is loaded by asking for the same file twice - it lands
@@ -6107,12 +6118,16 @@ function redraw()
   elseif c.id == "s_rate" then
     value = clock_label(params:get("s_rate"))
   elseif c.id == "noise_tone" then
-    -- the same knob means two things: a filter centre on the three washes, a
-    -- FUNDAMENTAL on the three resonant sources, where it is clamped to
-    -- something a struck object could plausibly be
+    -- the same knob means three things now: a filter centre on the three
+    -- washes, a PLAYBACK SPEED on the three looped sources (1200Hz is 1x),
+    -- and a FUNDAMENTAL on the three resonant sources, clamped to something
+    -- a struck object could plausibly be
     local hz = pval("noise_tone")
-    if params:get("noise_type") > 3 then
+    local nt = params:get("noise_type")
+    if nt > 6 then
       value = string.format("%.0fHz F0", util.clamp(hz, 60, 2000))
+    elseif nt > 3 then
+      value = string.format("%.2fx", hz / 1200)
     else
       value = string.format("%.0fHz", hz)
     end
