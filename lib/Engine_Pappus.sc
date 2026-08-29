@@ -345,7 +345,7 @@ Engine_Pappus : CroneEngine {
 				wphase, oldl, oldr, wpos, winlo, winhi, winspan, gph, trig, estep,
 				scanstretch, delaypos, scanpos, envsel, nvoices, swarm, dupgain,
 				swiva, swivb, unison, strumsp, prnd, warpa, warpb, gsum,
-				ssel, sst, sml, smr, gover, sxf;
+				ssel, sst, sml, smr, gover, sxf, dur, winspansec;
 				// SOURCE. What this granulator is recording, if anything.
 				//
 				//   1 OFF    nothing. The write is gated shut and the buffer
@@ -420,6 +420,26 @@ Engine_Pappus : CroneEngine {
 				winlo = Lag.kr(mwinstart, lagt).clip(0, 0.99);
 				winhi = Lag.kr(mwinend, lagt).clip(0.01, 1).max(winlo + 0.01);
 				winspan = winhi - winlo;
+
+				// SIZE, clamped to what the active WINDOW can actually deliver.
+				// Eight seconds, not four, on the top end of the raw knob -
+				// SIZE reaches eight BEATS now, and eight beats at 60 bpm is
+				// eight seconds; a four second ceiling would cap the top of
+				// the knob at slow tempos and nowhere else, which is the
+				// worst kind of limit because it moves.
+				//
+				// A grain is a straight, un-syncing read forward from its start
+				// point - GrainBuf samples pos/dur once at the trigger and never
+				// looks at the buffer again - so a grain longer than the window
+				// runs off the live edge into stale buffer content left behind
+				// by a shorter BUFFR, or gets lapped by BufWr's write head
+				// (both share the same buffer). Either way the samples under
+				// the grain change out from under it mid-envelope, with no
+				// crossfade: a splice, heard as a click, and the grain sounds
+				// cut off because it is. Capping dur to the window's own span
+				// keeps every grain inside the region that is actually live.
+				winspansec = (winspan * wlen / SampleRate.ir).max(0.002);
+				dur = Lag.kr(msize, lagt).clip(0.002, 8).min(winspansec);
 
 				// A resettable trigger rather than a bare Impulse, so the
 				// granulator can be aligned to a transport start instead of
@@ -529,7 +549,7 @@ Engine_Pappus : CroneEngine {
 				8.do { arg i;
 					var vtrig, dtrig, rnd, rnd2, off, pan, pos, base, g, coin;
 					var egate;
-					var dur, main, mainl, mainr, da, db, dsp, dupa, v, gjit;
+					var main, mainl, mainr, da, db, dsp, dupa, v, gjit;
 					// Gate the TRIGGER, not just the output. Gating only the output
 					// meant all 24 generators produced grains at all times and 23
 					// were multiplied by zero - 24x the work for the common case of
@@ -574,12 +594,6 @@ Engine_Pappus : CroneEngine {
 					// noise floor: 8 ms of jitter measured 5 dB less. It is scaled
 					// to the grain so a short one - where the attack matters - is
 					// smeared less than a long one.
-					// Eight seconds, not four. SIZE reaches eight BEATS now,
-					// and eight beats at 60 bpm is eight seconds - a four
-					// second ceiling would cap the top of the knob at slow
-					// tempos and nowhere else, which is the worst kind of
-					// limit because it moves.
-					dur = Lag.kr(msize, lagt).clip(0.002, 8);
 					gjit = TRand.ar(-1, 1, vtrig)
 						* ((dur * 0.04).min(0.008) / bufdur);
 					pos = ((winlo + ((scanpos + off + gjit).wrap(0, 1) * winspan))
@@ -878,13 +892,21 @@ Engine_Pappus : CroneEngine {
 			// point on THIS voice's own string - so it happens per voice, not
 			// once on the shared signal.
 			spos = Lag.kr(ppos, lagt).clip(0, 1);
+			// No per-voice pan here: MODAL never gives a voice a left or
+			// right identity either - its odd/even partial split onto
+			// pfl/pfr lands every voice's own energy in both channels
+			// alike, so the stereo picture is set by BRIGHTNESS/POSITION,
+			// not by which voice is playing. A fixed per-voice spread here
+			// would make MODE itself relocate whatever is sounding as it
+			// crossfades, so each voice stays centred like its MODAL
+			// counterpart does.
 			fstring = DC.ar([0, 0]);
 			8.do { arg i;
 				var period = 1 / svfrq[i];
 				var exc = pana - DelayC.ar(pana, 0.06, spos * period);
 				var voice = CombL.ar(exc, 0.06, period, sdec)
 					+ (CombL.ar(exc, 0.06, period * sdet, sdec) * 0.35);
-				fstring = fstring + Pan2.ar(voice * svamp[i], (i - 3.5) / 3.5 * 0.7);
+				fstring = fstring + Pan2.ar(voice * svamp[i], 0);
 			};
 			fstring = fstring * (0.6 / ((1 + (sdec * 3)) ** 0.3));
 
