@@ -494,7 +494,7 @@ local PAGES = {
       -- on one knob - and SHIMMER is the shimmer send, with its interval (an
       -- octave, a fifth, or the current SCALE's own fifth) on its mode.
       { id = "r_verb",    label = "VERB" },
-      { id = "r_shimmer", label = "SHIMMER", mode = "r_shimmer_mode" },
+      { id = "r_shimmer", label = "SHINE", mode = "r_shimmer_mode" },
       { id = "mx_limit", label = "LIMIT" },
       { id = "mx_out",   label = "LEVEL" },
       -- BPM lived on TRIQ, and TRIQ is gone. This is the plumbing page now,
@@ -2833,11 +2833,11 @@ local function add_params()
   -- so a held chord grows an ascending ghost instead of only decaying - the
   -- Valhalla move. MODE picks the interval it climbs by; see send_rshimmer
   -- for why SCALE reaches for a fifth rather than an octave.
-  params:add_control("r_shimmer", "shimmer amount",
+  params:add_control("r_shimmer", "shine amount",
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("r_shimmer", function(x) engine.rshimmer(x) end)
 
-  params:add_option("r_shimmer_mode", "shimmer interval",
+  params:add_option("r_shimmer_mode", "shine interval",
     { "OCT", "5TH", "SCALE" }, 1)
   params:set_action("r_shimmer_mode", function() send_rshimmer() end)
 

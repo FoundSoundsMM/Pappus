@@ -58,7 +58,7 @@ number on every box.
 reverb tail from a transient, so COMP holds the dry mix together first and
 REVERB gets whatever it leaves behind. **VERB** is one knob for wet, size and
 decay together — zero is a true bypass, one is a huge, slowly decaying tank.
-**SHIMMER** is a shimmer send: some of the tail is pitch shifted up and
+**SHINE** is a shimmer send: some of the tail is pitch shifted up and
 returned into the tank, so a held chord keeps climbing rather than only
 decaying. Its **MODE** picks the interval — an octave, a fifth, or the
 current SCALE's own nearest fifth.
