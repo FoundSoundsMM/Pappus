@@ -4504,21 +4504,34 @@ function draw_waveform()
   -- the badge covers the first SWB_W columns, so the trace starts after it
   local ilo = math.max(wlo * WAVE_N, SWB_W + 1)
   local ihi = whi * WAVE_N
-  local inlev, outlev = (locked and 9 or 6), (locked and 3 or 2)
-  local lev = nil
-  for i = SWB_W + 2, WAVE_N do
-    local want = ((i - 1) >= ilo - 1 and (i - 1) <= ihi) and inlev or outlev
-    if want ~= lev then
-      if lev then screen.stroke() end
-      screen.level(want)
-      lev = want
+  if locked then
+    -- SOS at max freezes the buffer, so the trace stops meaning anything -
+    -- it is the same picture forever until K3 lets go. Say that in words
+    -- instead of drawing a frozen waveform that looks like a live one.
+    local midx = SWB_W + 2 + ((WAVE_N - SWB_W - 2) / 2)
+    screen.level(15)
+    screen.move(midx, cy - 2)
+    screen.text_center("LOCKED")
+    screen.level(4)
+    screen.move(midx, cy + 7)
+    screen.text_center("HOLD K3 TO UNLOCK")
+  else
+    local inlev, outlev = 6, 2
+    local lev = nil
+    for i = SWB_W + 2, WAVE_N do
+      local want = ((i - 1) >= ilo - 1 and (i - 1) <= ihi) and inlev or outlev
+      if want ~= lev then
+        if lev then screen.stroke() end
+        screen.level(want)
+        lev = want
+      end
+      local h = (math.min(V.wave[i] / norm, 1) ^ 0.7) * maxh
+      if h < 0.5 then h = 0.5 end
+      screen.move(i - 0.5, cy - h)
+      screen.line(i - 0.5, cy + h)
     end
-    local h = (math.min(V.wave[i] / norm, 1) ^ 0.7) * maxh
-    if h < 0.5 then h = 0.5 end
-    screen.move(i - 0.5, cy - h)
-    screen.line(i - 0.5, cy + h)
+    screen.stroke()
   end
-  screen.stroke()
 
   -- active window: a bracket along the top edge. Grains only ever read from
   -- inside it, so it wants to be visible on both GRAINSWARM pages, not just the
@@ -5522,15 +5535,14 @@ end
 
 -- Draw a polyline as travelling dashes.
 --
--- The flow IS the signal: dash phase advances with the source granulator's
--- own meter, so a quiet granulator's wire creeps and a loud one's runs. That
--- is the whole reason the numbers came off the chain boxes - a number tells
--- you a level at a point, a moving wire tells you where the signal is going
--- and how much of it, in the same pixels.
+-- The flow IS the signal: dashes travel at a constant speed and it is
+-- brightness, not speed, that carries the feed amount. That is the whole
+-- reason the numbers came off the chain boxes - a number tells you a level
+-- at a point, a moving wire tells you where the signal is going, and how
+-- much of it is FEED AMOUNT in the same pixels, so turning a feed down
+-- fades its wire out rather than slowing it.
 --
--- Kept subtle on purpose: three-pixel dashes with three-pixel gaps, and the
--- brightness is the FEED AMOUNT rather than the level, so turning a feed down
--- fades its wire out rather than merely slowing it.
+-- Kept subtle on purpose: three-pixel dashes with three-pixel gaps.
 local function hal_flow(pts, amt, lvl, phase, lev)
   local segs = {}
   local total = 0
@@ -5589,14 +5601,11 @@ function draw_hallat()
         local amt = pval(f[gi])
         if amt > 0.005 then
           local lvl = meters[gi] or 0
-          -- phase runs on the free display clock, sped by the level. The
-          -- floor keeps a silent-but-routed wire visibly alive rather than
-          -- frozen, which would read as broken.
-          -- Speed is the whole story now, so it has to span a range you can
-          -- SEE: a silent-but-routed wire creeps at 0.4 dashes a second and a
-          -- loud one runs at fourteen. The floor is deliberately not zero -
-          -- a frozen wire reads as broken rather than as quiet.
-          local ph = filt_t * (0.4 + (math.min(lvl, 1) ^ 0.6) * 13)
+          -- phase runs on the free display clock at a fixed speed - dash
+          -- travel used to scale with level, but that read as the drawing
+          -- stuttering rather than as the signal being loud, so speed is now
+          -- constant and brightness (below) carries the feed amount instead.
+          local ph = filt_t * 4
           hal_flow(hal_wire(gi, b, lvl), amt, lvl, ph,
             util.clamp(math.floor(2 + (amt * 9)), 2, 12))
         end
