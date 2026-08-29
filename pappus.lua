@@ -2799,7 +2799,10 @@ local function advance_swarm(dt, w)
     -- strings. Same event, same moment.
     -- only the granulator FILTERBANK is listening to plucks its strings
     if spettru_pluck and spettru_swarm() == w then
-      spettru_pluck(0.5 + (out_amp_disp * 1.6))
+      -- grains land at the RATE regardless of level, so a floor here kept
+      -- kicking the strings hard on quiet input; strength now tracks the
+      -- actual output envelope, down to nothing when it is actually quiet
+      spettru_pluck(out_amp_disp * 2.1)
     end
     local spray = params:get(swid(w, "spray"))
     local base = params:get(swid(w, "pitch"))
@@ -5179,11 +5182,15 @@ function draw_spettru()
         screen.move(x, top + 1)
         screen.line(x, base - 1)
       else
-        local sw = math.sin((t * vf * 2 * math.pi) + r.ph) * amp
+        -- one cycle top to bottom, its phase creeping with time so the
+        -- ripple reads as travelling rather than the whole string just
+        -- bowing to one side; still pinned at both ends
+        local phase = (t * vf * 2 * math.pi) + r.ph
         local n = 7
         for k = 0, n do
           local uu = k / n
-          local dx = x + (sw * math.sin(uu * math.pi))
+          local env = math.sin(uu * math.pi)
+          local dx = x + (amp * env * math.sin((uu * math.pi * 2) - phase))
           if k == 0 then screen.move(dx, top + 1) else screen.line(dx, base - ((1 - uu) * L) - 1) end
         end
       end
