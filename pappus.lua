@@ -3354,6 +3354,12 @@ end
 -- So: duck to silence, change EVERYTHING at once in the dark, come back. The
 -- fade is what makes it a transition rather than a jump, and the silence in
 -- the middle is what makes the arrival read as arrival.
+--
+-- Each side of the duck is a full second, and there is a short pad of true
+-- silence either side of the swap - long enough for the engine's own fade
+-- Lag (60ms) to actually finish moving before anything changes underneath
+-- it. No blending of the two snapshots themselves: everything still flips
+-- at once, in the dark. Just a longer, cleaner dark.
 function snap_recall(n)
   if snap.busy then return end
   local sc = scenes[n]
@@ -3390,14 +3396,21 @@ function snap_recall(n)
   end
 
   clock.run(function()
-    -- OUT, over a fifth of a second. Fast enough not to feel like waiting,
-    -- slow enough that it is a fade rather than a cut.
-    local steps = 12
+    -- OUT, over a full second, in steps fine enough to read as a filter
+    -- closing rather than a staircase.
+    local steps = 60
     for k = 1, steps do
       engine.fade(1 - (k / steps))
-      clock.sleep(0.2 / steps)
+      clock.sleep(1.0 / steps)
     end
     engine.fade(0)
+    -- The engine's own fade control is a Lag.kr(fade, 0.06) - the ramp above
+    -- gets it to zero, but the lag itself is still chasing that last step for
+    -- another ~60ms after. Swapping the buffer and every parameter before it
+    -- has actually settled is what the clicks were: the tail end of the OLD
+    -- signal, still faintly live, hitting a hard parameter/buffer change.
+    -- This pause is silence's turn to actually finish.
+    clock.sleep(0.15)
 
     -- everything, in silence: the audio in both buffers, every parameter,
     -- both chords, the taps and the stored waveform pictures
@@ -3418,11 +3431,14 @@ function snap_recall(n)
       engine.bufclear(1)
     end
     swap()
-    clock.sleep(0.12)
+    -- And the same margin before opening back up, so the new snapshot is
+    -- fully in place - buffers read, parameters applied - before anything
+    -- is audible again.
+    clock.sleep(0.15)
 
     for k = 1, steps do
       engine.fade(k / steps)
-      clock.sleep(0.28 / steps)
+      clock.sleep(1.0 / steps)
     end
     engine.fade(1)
     snap.busy = false
