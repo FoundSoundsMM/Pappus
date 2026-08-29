@@ -245,11 +245,11 @@ Engine_Pappus : CroneEngine {
 				sin1 = 0, sin2 = 0,            // into DELAY
 				kin1 = 0, kin2 = 0,            // into COLOUR
 				oin1 = 0, oin2 = 0,            // straight to the output
-				// REVERB, ahead of COMP. rverb walks wet, size and decay
-				// together; rshift is the shimmer send, and rshiftsemi is the
-				// interval it climbs by, resolved in Lua (OCT/5TH/SCALE) and
-				// sent as a plain semitone count.
-				rverb = 0, rshift = 0, rshiftsemi = 12,
+				// REVERB, after COMP. rverb walks wet, size and decay
+				// together; rshimmer is the shimmer send, and rshimmersemi is
+				// the interval it climbs by, resolved in Lua (OCT/5TH/SCALE)
+				// and sent as a plain semitone count.
+				rverb = 0, rshimmer = 0, rshimmersemi = 12,
 				ingain = 1, mcomp = 0.2, limceil = 0.98855,
 				bypass = 0, amp = 1, fade = 1, run = 1;
 
@@ -261,7 +261,7 @@ Engine_Pappus : CroneEngine {
 			var svfrq, svamp, sdec, sdet, spos;
 			var pin, kin, omix, mcp;
 			var ramt, rsize, rdecay, rdamp, rin, rmono, rtankc, rwet, rratio,
-				rshifted, shimmerfb, shimmerout, rsend, rkeep, rout;
+				rshifted, shimmerfb, shimmerout, rsend, rkeep;
 			var fsum, fmix, fsend, fwt;
 			var presig, sfeed;
 			var dframes, dph, fbtime, fbrd, fblo, fbhi, fbcol, fbamt, dwrite;
@@ -1277,8 +1277,51 @@ Engine_Pappus : CroneEngine {
 			];
 			mt5 = Amplitude.kr((kout[0] + kout[1]) * 0.5, 0.01, 0.2);
 
+			// ---- THE MIX ----
+			// COLOUR's output plus anything routed straight past everything.
+			// This is SIGNAL: there is no mixer stage of its own, because a
+			// mixer whose faders are all somewhere else is just a sum.
+			omix = kout + gfeed.value(oin1, oin2);
+
+			// ---- COMP, the one master control ----
+			// Moved here from COLOUR, where it was compressing the colour
+			// stage's own output and had nothing to do with the mix. A
+			// compressor's job is to hold a MIX together, so it belongs
+			// right after the mix - and before REVERB, not after: COMP does
+			// not know a reverb tail from a transient, and a tail compressed
+			// along with everything else is a tail with its own decay
+			// ironed flat. REVERB gets what COMP leaves behind instead.
+			//
+			// Same law it had on COLOUR - a Compander whose threshold and
+			// slope both walk with the knob, plus make-up - so what it does at
+			// a given setting is what it always did.
+			mcp = Lag.kr(mcomp, lagt).clip(0, 1);
+			outsig = Compander.ar(omix, omix,
+				thresh: (1 - (mcp * 0.92)).max(0.02),
+				slopeBelow: 1,
+				slopeAbove: (1 - (mcp * 0.9)).max(0.1),
+				clampTime: 0.006,
+				relaxTime: 0.15
+			);
+			// MAKE-UP, derived rather than guessed.
+			//
+			// This was `1 + (mcp * 2.5)` when the compressor lived on COLOUR:
+			// a flat +3.5 dB at the 0.2 default, applied whether the
+			// compressor had taken anything off or not. On a colour stage
+			// nobody noticed. On the MASTER it is three and a half decibels
+			// of unearned level walking straight into the limiter.
+			//
+			// The Compander's above-threshold law is out = t + (in - t) * s,
+			// so the gain it applies to a full-scale peak is exactly that
+			// evaluated at in = 1. Inverting it restores the peak and nothing
+			// more: +0.3 dB at the default, +15 dB when the knob is buried,
+			// and always precisely what was taken away.
+			outsig = outsig / ((1 - (mcp * 0.92)).max(0.02)
+				+ ((1 - (1 - (mcp * 0.92)).max(0.02))
+					* (1 - (mcp * 0.9)).max(0.1)));
+
 			// =============================================================
-			// REVERB - a shimmer tank, ahead of COMP
+			// REVERB - a shimmer tank, after COMP
 			// =============================================================
 			// Two knobs, on purpose no more. AMOUNT walks wet, size and decay
 			// together: turning a reverb up usually means "more of all
@@ -1286,10 +1329,10 @@ Engine_Pappus : CroneEngine {
 			// zero has to be a silent bypass rather than a small dry room
 			// nobody asked for - which the wet crossfade below guarantees on
 			// its own, since size and decay only matter once something is
-			// audibly wet. SHIFT is the Valhalla move: some of the tank's own
-			// tail is pitch shifted and handed back to the tank's input, so a
-			// held chord keeps climbing instead of only decaying. At zero it
-			// is an ordinary tail.
+			// audibly wet. SHIMMER is the Valhalla move: some of the tank's
+			// own tail is pitch shifted and handed back to the tank's input,
+			// so a held chord keeps climbing instead of only decaying. At
+			// zero it is an ordinary tail.
 			ramt = Lag.kr(rverb, lagt).clip(0, 1);
 			rsize = 1 + (ramt * 2);
 			rdecay = 0.3 + (ramt.pow(1.6) * 11.7);
@@ -1299,17 +1342,17 @@ Engine_Pappus : CroneEngine {
 			// small one does not, which is the part that reads as "size".
 			rdamp = 11000 - (ramt * 8000);
 
-			// SHIFT's interval is resolved in Lua, not here - OCT and 5TH are
-			// fixed semitone counts, and SCALE is the current scale's own
+			// SHIMMER's interval is resolved in Lua, not here - OCT and 5TH
+			// are fixed semitone counts, and SCALE is the current scale's own
 			// nearest degree to a fifth (an octave snaps to itself in every
 			// scale on this instrument, since the root is always degree
-			// zero - that is why SHIFT reaches for a fifth rather than an
+			// zero - that is why SHIMMER reaches for a fifth rather than an
 			// octave when it wants the scale to matter). Whatever Lua decided
 			// arrives here as a plain semitone count, same convention as
 			// DELAY's PITCH SPREAD.
-			rratio = 2 ** (Lag.kr(rshiftsemi, lagt) / 12);
+			rratio = 2 ** (Lag.kr(rshimmersemi, lagt) / 12);
 
-			rmono = (kout[0] + kout[1]) * 0.5;
+			rmono = (outsig[0] + outsig[1]) * 0.5;
 			rin = rmono + shimmerfb;
 
 			// Six damped combs, three per channel so the two sides read
@@ -1345,62 +1388,22 @@ Engine_Pappus : CroneEngine {
 			// rather than just ring at a fixed interval once and decay.
 			rshifted = PitchShift.ar((rwet[0] + rwet[1]) * 0.5, 0.15, rratio,
 				0, 0.008);
-			shimmerout = (rshifted * Lag.kr(rshift, lagt).clip(0, 1) * 0.9)
+			shimmerout = (rshifted * Lag.kr(rshimmer, lagt).clip(0, 1) * 0.9)
 				.clip2(1.3);
 
 			// Same two-gain trick as RESONATOR and DELAY: an equal-power
 			// crossfade on the ONE knob that is also driving size and decay,
-			// so AMOUNT at zero really is COLOUR's output, untouched.
+			// so AMOUNT at zero really is COMP's output, untouched.
 			rsend = (ramt * 0.5pi).sin;
 			rkeep = (ramt * 0.5pi).cos;
-			rout = (kout * rkeep) + (rwet * rsend);
-			mt6 = Amplitude.kr((rout[0] + rout[1]) * 0.5, 0.01, 0.2);
+			outsig = (outsig * rkeep) + (rwet * rsend);
+			mt6 = Amplitude.kr((outsig[0] + outsig[1]) * 0.5, 0.01, 0.2);
 
 			// Everything that has to cross a block boundary, written once - a
 			// SynthDef gets one LocalOut and it has to sit here, after the
 			// last thing that reads from it exists, which is now REVERB's
 			// shimmer send rather than COLOUR's crush.
 			LocalOut.ar(crushfb ++ [shimmerout]);
-
-			// ---- THE MIX ----
-			// REVERB's output plus anything routed straight past everything.
-			// This is SIGNAL: there is no mixer stage of its own, because a
-			// mixer whose faders are all somewhere else is just a sum.
-			omix = rout + gfeed.value(oin1, oin2);
-
-			// ---- COMP, the one master control ----
-			// Moved here from COLOUR, where it was compressing the colour
-			// stage's own output and had nothing to do with the mix. A
-			// compressor's job is to hold a MIX together, so it belongs after
-			// the mix and before the hidden glue.
-			//
-			// Same law it had on COLOUR - a Compander whose threshold and
-			// slope both walk with the knob, plus make-up - so what it does at
-			// a given setting is what it always did.
-			mcp = Lag.kr(mcomp, lagt).clip(0, 1);
-			outsig = Compander.ar(omix, omix,
-				thresh: (1 - (mcp * 0.92)).max(0.02),
-				slopeBelow: 1,
-				slopeAbove: (1 - (mcp * 0.9)).max(0.1),
-				clampTime: 0.006,
-				relaxTime: 0.15
-			);
-			// MAKE-UP, derived rather than guessed.
-			//
-			// This was `1 + (mcp * 2.5)` when the compressor lived on COLOUR:
-			// a flat +3.5 dB at the 0.2 default, applied whether the
-			// compressor had taken anything off or not. On a colour stage
-			// nobody noticed. On the MASTER it is three and a half decibels
-			// of unearned level walking straight into the limiter.
-			//
-			// The Compander's above-threshold law is out = t + (in - t) * s,
-			// so the gain it applies to a full-scale peak is exactly that
-			// evaluated at in = 1. Inverting it restores the peak and nothing
-			// more: +0.3 dB at the default, +15 dB when the knob is buried,
-			// and always precisely what was taken away.
-			outsig = outsig / ((1 - (mcp * 0.92)).max(0.02)
-				+ ((1 - (1 - (mcp * 0.92)).max(0.02))
-					* (1 - (mcp * 0.9)).max(0.1)));
 
 			// THE HIDDEN MASTER CHAIN IS GONE.
 			//
@@ -1420,8 +1423,8 @@ Engine_Pappus : CroneEngine {
 			//
 			// A stage nobody can turn off has to be right for every signal
 			// that can reach it. These were right for one of them. Master is
-			// COMP - which is on the page, with a number - then the level and
-			// the limiter, and nothing else.
+			// COMP - which is on the page, with a number - then REVERB, then
+			// the level and the limiter, and nothing else.
 
 			outsig = LeakDC.ar(outsig) * Lag.kr(amp, 0.05) * Lag.kr(fade, 0.06);
 			outsig = Limiter.ar(outsig,
@@ -1535,8 +1538,8 @@ Engine_Pappus : CroneEngine {
 
 		// ---- REVERB ----
 		this.addCommand("rverb", "f", { arg msg; synth.set(\rverb, msg[1]); });
-		this.addCommand("rshift", "f", { arg msg; synth.set(\rshift, msg[1]); });
-		this.addCommand("rshiftsemi", "f", { arg msg; synth.set(\rshiftsemi, msg[1]); });
+		this.addCommand("rshimmer", "f", { arg msg; synth.set(\rshimmer, msg[1]); });
+		this.addCommand("rshimmersemi", "f", { arg msg; synth.set(\rshimmersemi, msg[1]); });
 
 		// ---- THE ROUTING ----
 		// Two per stage: how much of each granulator is fed in there.

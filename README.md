@@ -57,11 +57,13 @@ is decided by how much is fed into it, which is one idea instead of two that
 fight. SIGNAL draws the whole thing as a wireframe with a live meter and a dB
 number on every box.
 
-**REVERB** sits on SIGNAL itself, ahead of COMP. **AMOUNT** is one knob for
-wet, size and decay together — zero is a true bypass, one is a huge, slowly
-decaying tank. **SHIFT** is a shimmer send: some of the tail is pitch shifted
-up and returned into the tank, so a held chord keeps climbing rather than
-only decaying. Its **MODE** picks the interval — an octave, a fifth, or the
+**REVERB** sits on SIGNAL itself, after COMP — a compressor does not know a
+reverb tail from a transient, so COMP holds the dry mix together first and
+REVERB gets whatever it leaves behind. **VERB** is one knob for wet, size and
+decay together — zero is a true bypass, one is a huge, slowly decaying tank.
+**SHIMMER** is a shimmer send: some of the tail is pitch shifted up and
+returned into the tank, so a held chord keeps climbing rather than only
+decaying. Its **MODE** picks the interval — an octave, a fifth, or the
 current SCALE's own nearest fifth.
 
 **RESONATOR** is a Rings-style modal/string resonator excited by the
@@ -78,7 +80,7 @@ unity and let the wet ride on top, which mattered when a stage was the only
 way to get a dry signal past itself; SIGNAL's feeds do that properly now, and
 two mechanisms for one job is how a routing page stops being readable.
 
-Master is **mixer → REVERB → COMP → limiter**, and nothing else. There used to be a
+Master is **mixer → COMP → REVERB → limiter**, and nothing else. There used to be a
 hidden mastering stage — expander, saturation, width, tape wobble — which
 measured well on a grain cloud and buffeted audibly on a clean signal passed
 straight through. A stage nobody can turn off has to be right for every signal

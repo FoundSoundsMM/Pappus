@@ -487,14 +487,14 @@ local PAGES = {
       -- are gone: how loud a module is in the mix is decided by how much is
       -- fed into it, which is one idea instead of two that fight.
       { id = "o_in1", alt = "o_in2", label = "DRY IN", dual = true },
-      -- REVERB, ahead of COMP: a compressor holds a mix together, so it
-      -- belongs after everything that is still shaping the mix, reverb
-      -- included. REVERB is AMOUNT - wet, size and decay on one knob - and
-      -- SHIFT is the shimmer send, with its interval (an octave, a fifth, or
-      -- the current SCALE's own fifth) on its mode.
-      { id = "r_verb",  label = "REVERB" },
-      { id = "r_shift", label = "SHIFT", mode = "r_shift_mode" },
       { id = "mx_comp",  label = "COMP"  },
+      -- VERB, after COMP: a compressor holds the DRY mix together, and does
+      -- not know a reverb tail from a transient, so it runs first and VERB
+      -- gets whatever it leaves behind. VERB is AMOUNT - wet, size and decay
+      -- on one knob - and SHIMMER is the shimmer send, with its interval (an
+      -- octave, a fifth, or the current SCALE's own fifth) on its mode.
+      { id = "r_verb",    label = "VERB" },
+      { id = "r_shimmer", label = "SHIMMER", mode = "r_shimmer_mode" },
       { id = "mx_limit", label = "LIMIT" },
       { id = "mx_out",   label = "LEVEL" },
       -- BPM lived on TRIQ, and TRIQ is gone. This is the plumbing page now,
@@ -860,7 +860,7 @@ local function snap_to_scale(semi, sc)
   return (oct * 12) + best
 end
 
--- REVERB's SHIFT interval, resolved here rather than in the engine because
+-- VERB's SHIMMER interval, resolved here rather than in the engine because
 -- SCALE needs the scale table. OCT and 5TH are fixed - 12 and 7 semitones -
 -- and SCALE is NOT an octave snapped to the scale: snap_to_scale(12, sc)
 -- would just return 12 again for almost every scale, since the root is
@@ -869,12 +869,12 @@ end
 -- SCALE snaps THAT instead - the scale's own nearest approximation to a
 -- fifth, flat in Locrian, wherever a given mode puts it - which is the one
 -- version of "quantised to scale" that actually depends on the scale.
-local function send_rshift()
-  local m = pval("r_shift_mode")
+local function send_rshimmer()
+  local m = pval("r_shimmer_mode")
   local semi = 12
   if m == 2 then semi = 7
   elseif m == 3 then semi = snap_to_scale(7, pval("m_scale")) end
-  engine.rshiftsemi(semi)
+  engine.rshimmersemi(semi)
 end
 
 -- DELAY's PITCH SPREAD, the second knob on the SPREAD cell. Same shape as
@@ -2178,9 +2178,10 @@ local function add_params()
       if params:get(swid(w, "vspread")) > 0 then distribute(w) end
       send_voices(w)
     end
-    -- REVERB's SHIFT is only affected in SCALE mode, but send_rshift() checks
-    -- that itself - cheaper to always call than to duplicate the check here.
-    send_rshift()
+    -- VERB's SHIMMER is only affected in SCALE mode, but send_rshimmer()
+    -- checks that itself - cheaper to always call than to duplicate the
+    -- check here.
+    send_rshimmer()
   end)
 
   -- 1/4: a grain per beat. A bar per grain was a texture default; this is
@@ -2807,27 +2808,6 @@ local function add_params()
   -- The returns reach +12 because a SEND with a quiet return is the whole
   -- reason this page exists.
 
-  -- REVERB, ahead of COMP: mixer > REVERB > COMP > the hidden glue >
-  -- limiter. AMOUNT is the one knob a reverb usually needs turned at once -
-  -- wet, size and decay together - so zero is a true bypass and one is a
-  -- huge, long tail, with everything between the two moving as a single
-  -- gesture rather than three.
-  params:add_control("r_verb", "reverb amount",
-    controlspec.new(0, 1, "lin", 0, 0, ""))
-  params:set_action("r_verb", function(x) engine.rverb(x) end)
-
-  -- SHIFT is the shimmer: some of the tail is pitch shifted up and returned
-  -- to the tank, so a held chord grows an ascending ghost instead of only
-  -- decaying - the Valhalla move. MODE picks the interval it climbs by; see
-  -- send_rshift for why SCALE reaches for a fifth rather than an octave.
-  params:add_control("r_shift", "reverb shift",
-    controlspec.new(0, 1, "lin", 0, 0, ""))
-  params:set_action("r_shift", function(x) engine.rshift(x) end)
-
-  params:add_option("r_shift_mode", "reverb shift interval",
-    { "OCT", "5TH", "SCALE" }, 1)
-  params:set_action("r_shift_mode", function() send_rshift() end)
-
   -- POST: the sends hear the GRAINSWARM fader, so pulling it down takes the
   -- effects with it. PRE: they do not, so the tails ring on as the source
   -- fades away.
@@ -2837,6 +2817,29 @@ local function add_params()
   params:add_control("mx_comp", "master comp",
     controlspec.new(0, 1, "lin", 0, 0.2, ""))
   params:set_action("mx_comp", function(x) engine.mcomp(x) end)
+
+  -- VERB, after COMP: mixer > COMP > VERB > the hidden glue > limiter. A
+  -- compressor does not know a reverb tail from a transient, so COMP runs on
+  -- the dry mix and VERB gets whatever COMP leaves behind - its tail keeps
+  -- the dynamics COMP gave it rather than having them ironed flat. AMOUNT is
+  -- one knob for wet, size and decay together - zero is a true bypass, one
+  -- is a huge, long tail, with everything between the two moving as a
+  -- single gesture rather than three.
+  params:add_control("r_verb", "verb amount",
+    controlspec.new(0, 1, "lin", 0, 0, ""))
+  params:set_action("r_verb", function(x) engine.rverb(x) end)
+
+  -- SHIMMER: some of the tail is pitch shifted up and returned to the tank,
+  -- so a held chord grows an ascending ghost instead of only decaying - the
+  -- Valhalla move. MODE picks the interval it climbs by; see send_rshimmer
+  -- for why SCALE reaches for a fifth rather than an octave.
+  params:add_control("r_shimmer", "shimmer amount",
+    controlspec.new(0, 1, "lin", 0, 0, ""))
+  params:set_action("r_shimmer", function(x) engine.rshimmer(x) end)
+
+  params:add_option("r_shimmer_mode", "shimmer interval",
+    { "OCT", "5TH", "SCALE" }, 1)
+  params:set_action("r_shimmer_mode", function() send_rshimmer() end)
 
   -- -0.1 dB, not -0.5. With the routing summing up to eight feeds the limiter
   -- is doing real work now, and the last tenth of a decibel of headroom is
