@@ -2795,15 +2795,6 @@ local function advance_swarm(dt, w)
   while V.grain_acc >= 1 and spawns < 6 do
     V.grain_acc = V.grain_acc - 1
     spawns = spawns + 1
-    -- a grain landing is what excites the bank, so it is what plucks the
-    -- strings. Same event, same moment.
-    -- only the granulator FILTERBANK is listening to plucks its strings
-    if spettru_pluck and spettru_swarm() == w then
-      -- grains land at the RATE regardless of level, so a floor here kept
-      -- kicking the strings hard on quiet input; strength now tracks the
-      -- actual output envelope, down to nothing when it is actually quiet
-      spettru_pluck(out_amp_disp * 2.1)
-    end
     local spray = params:get(swid(w, "spray"))
     local base = params:get(swid(w, "pitch"))
     local sc = params:get("m_scale")
@@ -5080,49 +5071,32 @@ end
 -- stand-in that rises with pitch, so high strings still shimmer faster.
 -- ---------------------------------------------------------------------------
 
+-- each string's phase is set once, from its index, and never touched again -
+-- a phase that gets randomised on every grain landing is a phase that jumps,
+-- and a jump reads as a glitch, not a wobble. What moves is only the
+-- amplitude, which tracks the live level.
 local sring = {}
-for i = 1, NBAND do sring[i] = { a = 0, ph = 0 } end
-
--- called from the animation tick whenever a grain fires
-function spettru_pluck(strength)
-  for i = 1, NBAND do
-    local g = spettru_band_amp(i)
-    if g > 0.0005 then
-      local r = sring[i]
-      -- a little per-string variation, so forty-eight strings do not all
-      -- move as one object
-      r.a = math.min(1, r.a + (g * 6 * strength * (0.55 + (math.random() * 0.6))))
-      r.ph = math.random() * math.pi * 2
-    end
-  end
+for i = 1, NBAND do
+  sring[i] = { a = 0, ph = (i * 2.399963) % (2 * math.pi) }
 end
 
 function spettru_strings(dt)
-  -- ring time, the engine's curve exactly: 3 ms .. 2.7 s
+  -- how quickly the wobble's size follows the live level. Reuses RESONANCE's
+  -- curve so a long RESONANCE still reads as a slower, more liquid picture,
+  -- but as a settling time on an envelope follower now, not a decay after a
+  -- kick - there is no kick left to decay from.
   local rt = 0.003 * (900 ^ util.clamp(pval("p_reso"), 0, 1))
-  -- The EYE's decay, not the ear's. At RESONANCE 0.35 a resonator rings for
-  -- 33 ms, which at twenty-five frames a second is gone before it is drawn -
-  -- so the floor is 0.22 s. Above that the picture follows the real ring
-  -- time, and a long RESONANCE visibly keeps the strings moving for seconds.
-  local k = math.exp(-dt / math.max(rt * 1.6, 0.22))
-  local lo, hi = 1e9, -1e9
-  -- A grain is not only an onset: it keeps feeding the bank for as long as it
-  -- lasts, and at a slow RATE the plucks alone would leave the strings dead
-  -- most of the time. So the decay sets a FLOOR from the output envelope -
-  -- while there is sound, the strings keep moving - and the pluck is the kick
-  -- on top of it.
+  local ease = 1 - math.exp(-dt / math.max(rt * 1.6, 0.22))
   local drive = math.min(out_amp_disp * 2.4, 1)
+  local lo, hi = 1e9, -1e9
   for i = 1, NBAND do
     local r = sring[i]
-    r.a = r.a * k
     local g0 = spettru_band_amp(i)
-    if g0 > 0.0005 then
-      r.a = math.max(r.a, math.min(1, g0 * 3.5 * drive))
-      if r.ph == 0 then r.ph = math.random() * math.pi * 2 end
-    end
+    local target = math.min(1, g0 * 3.5 * drive)
+    r.a = r.a + ((target - r.a) * ease)
     if r.a < 0.0005 then r.a = 0 end
     local f = spettru_band_hz(i)
-    if f > 20 and spettru_band_amp(i) > 0.0005 then
+    if f > 20 and g0 > 0.0005 then
       if f < lo then lo = f end
       if f > hi then hi = f end
     end
@@ -5171,10 +5145,11 @@ function draw_spettru()
       -- per-frame phase step turning into a flicker.
       local u = util.clamp((x - 2) / 123, 0, 1)
       local vf = 0.8 + (u * 2.7)
-      -- how far it bows, in pixels. Forty-eight strings across 123 pixels
-      -- sit about two and a half apart, so five is a wide swing without the
-      -- picture turning to soup.
-      local amp = math.min(r.a, 1) * (0.4 + (0.6 * math.min(g * 3.5, 1))) * 6.5
+      -- how far it bows, in pixels - straight off the eased level, so the
+      -- swing simply grows and shrinks with volume. Forty-eight strings
+      -- across 123 pixels sit about two and a half apart, so 6.5 is a wide
+      -- swing without the picture turning to soup.
+      local amp = math.min(r.a, 1) * 6.5
       local lv = util.clamp(
         math.floor(((4 + (r.a * 11)) * lit) + 0.5), 1, 15)
       screen.level(lv)
