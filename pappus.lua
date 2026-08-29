@@ -490,10 +490,11 @@ local PAGES = {
       { id = "mx_comp",  label = "COMP"  },
       -- VERB, after COMP: a compressor holds the DRY mix together, and does
       -- not know a reverb tail from a transient, so it runs first and VERB
-      -- gets whatever it leaves behind. VERB is AMOUNT - wet, size and decay
-      -- on one knob - and SHIMMER is the shimmer send, with its interval (an
-      -- octave, a fifth, or the current SCALE's own fifth) on its mode.
-      { id = "r_verb",    label = "VERB" },
+      -- gets whatever it leaves behind. E2 is wet/dry, E3 is TIME - size and
+      -- decay together, frozen at the top of its travel - and SHIMMER is the
+      -- shimmer send, with its interval (an octave, a fifth, or the current
+      -- SCALE's own fifth) on its mode.
+      { id = "r_verb",    label = "VERB", alt = "r_decay" },
       { id = "r_shimmer", label = "SHINE", mode = "r_shimmer_mode" },
       { id = "mx_limit", label = "LIMIT" },
       { id = "mx_out",   label = "LEVEL" },
@@ -2821,13 +2822,22 @@ local function add_params()
   -- VERB, after COMP: mixer > COMP > VERB > the hidden glue > limiter. A
   -- compressor does not know a reverb tail from a transient, so COMP runs on
   -- the dry mix and VERB gets whatever COMP leaves behind - its tail keeps
-  -- the dynamics COMP gave it rather than having them ironed flat. AMOUNT is
-  -- one knob for wet, size and decay together - zero is a true bypass, one
-  -- is a huge, long tail, with everything between the two moving as a
-  -- single gesture rather than three.
+  -- the dynamics COMP gave it rather than having them ironed flat. VERB
+  -- itself is wet/dry only now, and a true bypass at zero regardless of
+  -- TIME: nothing about the tank's size or decay lives on this knob any
+  -- more.
   params:add_control("r_verb", "verb amount",
     controlspec.new(0, 1, "lin", 0, 0, ""))
   params:set_action("r_verb", function(x) engine.rverb(x) end)
+
+  -- TIME is E3 on the VERB cell: size and decay together, one knob because
+  -- turning a tank up usually means "bigger AND longer" as a single move.
+  -- Pushed to the top it goes past "huge, long tail" into FROZEN - the tank's
+  -- feedback holds instead of decaying, a shimmer-tank freeze rather than a
+  -- tap-tempo delay - see the note by rdecay in the engine for the curve.
+  params:add_control("r_decay", "verb time",
+    controlspec.new(0, 1, "lin", 0, 0, ""))
+  params:set_action("r_decay", function(x) engine.rtime(x) end)
 
   -- SHIMMER: some of the tail is pitch shifted up and returned to the tank,
   -- so a held chord grows an ascending ghost instead of only decaying - the

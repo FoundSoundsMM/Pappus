@@ -245,11 +245,13 @@ Engine_Pappus : CroneEngine {
 				sin1 = 0, sin2 = 0,            // into DELAY
 				kin1 = 0, kin2 = 0,            // into COLOUR
 				oin1 = 0, oin2 = 0,            // straight to the output
-				// REVERB, after COMP. rverb walks wet, size and decay
-				// together; rshimmer is the shimmer send, and rshimmersemi is
-				// the interval it climbs by, resolved in Lua (OCT/5TH/SCALE)
-				// and sent as a plain semitone count.
-				rverb = 0, rshimmer = 0, rshimmersemi = 12,
+				// REVERB, after COMP. rverb is wet/dry, rtime is size and
+				// decay together (pushed all the way up, the tank freezes -
+				// see the note by rdecay below); rshimmer is the shimmer
+				// send, and rshimmersemi is the interval it climbs by,
+				// resolved in Lua (OCT/5TH/SCALE) and sent as a plain
+				// semitone count.
+				rverb = 0, rtime = 0, rshimmer = 0, rshimmersemi = 12,
 				ingain = 1, mcomp = 0.2, limceil = 0.98855,
 				bypass = 0, amp = 1, fade = 1, run = 1;
 
@@ -260,8 +262,8 @@ Engine_Pappus : CroneEngine {
 			var fmodal, fstring, mfade;
 			var svfrq, svamp, sdec, sdet, spos;
 			var pin, kin, omix, mcp;
-			var ramt, rsize, rdecay, rdamp, rin, rmono, rtankc, rwet, rratio,
-				rshifted, shimmerfb, shimmerout, rsend, rkeep;
+			var ramt, rtl, rsize, rdecay, rdamp, rin, rmono, rtankc, rwet,
+				rratio, rshifted, shimmerfb, shimmerout, rsend, rkeep;
 			var fsum, fmix, fsend, fwt;
 			var presig, sfeed;
 			var dframes, dph, fbtime, fbrd, fblo, fbhi, fbcol, fbamt, dwrite;
@@ -1345,24 +1347,33 @@ Engine_Pappus : CroneEngine {
 			// =============================================================
 			// REVERB - a shimmer tank, after COMP
 			// =============================================================
-			// Two knobs, on purpose no more. AMOUNT walks wet, size and decay
-			// together: turning a reverb up usually means "more of all
-			// three" at once, not three separate decisions, and AMOUNT at
-			// zero has to be a silent bypass rather than a small dry room
-			// nobody asked for - which the wet crossfade below guarantees on
-			// its own, since size and decay only matter once something is
-			// audibly wet. SHIMMER is the Valhalla move: some of the tank's
-			// own tail is pitch shifted and handed back to the tank's input,
-			// so a held chord keeps climbing instead of only decaying. At
-			// zero it is an ordinary tail.
+			// Two knobs for the tank itself, on purpose no more. VERB is
+			// wet/dry only, so it is the one honest bypass: at zero this whole
+			// stage is COMP's output, untouched, no matter where TIME sits.
+			// TIME walks size and decay together - turning a tank up usually
+			// means "bigger AND longer" at once, not two separate decisions -
+			// and at its ceiling the decay curve below stops being a long tail
+			// and goes FROZEN: the comb feedback coefficient lands close
+			// enough to 1 that whatever is already circulating just holds,
+			// same idea as the freeze switch on a hardware reverb. SHIMMER is
+			// the Valhalla move: some of the tank's own tail is pitch shifted
+			// and handed back to the tank's input, so a held chord keeps
+			// climbing instead of only decaying. At zero it is an ordinary
+			// tail.
 			ramt = Lag.kr(rverb, lagt).clip(0, 1);
-			rsize = 1 + (ramt * 2);
-			rdecay = 0.3 + (ramt.pow(1.6) * 11.7);
+			rtl = Lag.kr(rtime, lagt).clip(0, 1);
+			rsize = 1 + (rtl * 2);
+			// rtl.pow(20) sits at effectively zero across most of the knob's
+			// travel and only wakes up in the last few percent, so TIME runs
+			// an ordinary 0.3-12s tail almost the whole way and only snaps to
+			// the +9988s (i.e. FROZEN) territory right at the top - a detent,
+			// not a gradual creep toward infinite decay.
+			rdecay = 0.3 + (rtl.pow(1.6) * 11.7) + (rtl.pow(20) * 9988);
 			// One shared lowpass stands in for per-comb damping: a true FDN
 			// darkens EACH repeat, this only darkens the sum, but it costs a
 			// sixth of the filters and still gives a big tank the dull tail a
 			// small one does not, which is the part that reads as "size".
-			rdamp = 11000 - (ramt * 8000);
+			rdamp = 11000 - (rtl * 8000);
 
 			// SHIMMER's interval is resolved in Lua, not here - OCT and 5TH
 			// are fixed semitone counts, and SCALE is the current scale's own
@@ -1414,8 +1425,8 @@ Engine_Pappus : CroneEngine {
 				.clip2(1.3);
 
 			// Same two-gain trick as RESONATOR and DELAY: an equal-power
-			// crossfade on the ONE knob that is also driving size and decay,
-			// so AMOUNT at zero really is COMP's output, untouched.
+			// crossfade on VERB alone, decoupled from TIME, so VERB at zero
+			// really is COMP's output, untouched, whatever TIME is doing.
 			rsend = (ramt * 0.5pi).sin;
 			rkeep = (ramt * 0.5pi).cos;
 			outsig = (outsig * rkeep) + (rwet * rsend);
@@ -1560,6 +1571,7 @@ Engine_Pappus : CroneEngine {
 
 		// ---- REVERB ----
 		this.addCommand("rverb", "f", { arg msg; synth.set(\rverb, msg[1]); });
+		this.addCommand("rtime", "f", { arg msg; synth.set(\rtime, msg[1]); });
 		this.addCommand("rshimmer", "f", { arg msg; synth.set(\rshimmer, msg[1]); });
 		this.addCommand("rshimmersemi", "f", { arg msg; synth.set(\rshimmersemi, msg[1]); });
 

@@ -56,9 +56,12 @@ number on every box.
 
 **REVERB** sits on SIGNAL itself, after COMP — a compressor does not know a
 reverb tail from a transient, so COMP holds the dry mix together first and
-REVERB gets whatever it leaves behind. **VERB** is one knob for wet, size and
-decay together — zero is a true bypass, one is a huge, slowly decaying tank.
-**SHINE** is a shimmer send: some of the tail is pitch shifted up and
+REVERB gets whatever it leaves behind. **VERB** is wet/dry — zero is a true
+bypass, whatever its secondary knob is doing — and its secondary, **TIME**,
+walks size and decay together, from a short tail up to a huge, slowly
+decaying tank; pushed all the way it goes past "huge" into frozen, holding
+the tank's tail instead of letting it decay. **SHINE** is a shimmer send:
+some of the tail is pitch shifted up and
 returned into the tank, so a held chord keeps climbing rather than only
 decaying. Its **MODE** picks the interval — an octave, a fifth, or the
 current SCALE's own nearest fifth.
