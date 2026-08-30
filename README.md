@@ -41,65 +41,6 @@ GRAINSWARM 1 \
               >  RESONATOR  >  DELAY  >  COLOUR  >  REVERB  >  out
 GRAINSWARM 2 /
 ```
-
-Fixed order, and **SIGNAL is the routing**. Every stage has an amount of each
-granulator fed into it — **DRY IN**, two bars in one cell, E2 for GRAINSWARM 1 and E3 for
-GRAINSWARM 2, all eight at 70% by default. A granulator entering at RESONATOR
-flows through everything after it; one entering only at COLOUR has skipped the
-first two; one entering only at SIGNAL's **DRY IN** has skipped the lot. Turn a feed to
-zero and that granulator bypasses that module — independently of the other one.
-
-There are no module faders and no reordering: how loud a module is in the mix
-is decided by how much is fed into it, which is one idea instead of two that
-fight. SIGNAL draws the whole thing as a wireframe with a live meter and a dB
-number on every box.
-
-**REVERB** sits on SIGNAL itself, after COMP — a compressor does not know a
-reverb tail from a transient, so COMP holds the dry mix together first and
-REVERB gets whatever it leaves behind. **VERB** is wet/dry — zero is a true
-bypass, whatever its secondary knob is doing — and its secondary, **TIME**,
-walks size and decay together, from a short tail up to a huge, slowly
-decaying tank; pushed all the way it goes past "huge" into frozen, holding
-the tank's tail instead of letting it decay. **SHINE** is a shimmer send:
-some of the tail is pitch shifted up and
-returned into the tank, so a held chord keeps climbing rather than only
-decaying. Its **MODE** picks the interval — an octave, a fifth, or the
-current SCALE's own nearest fifth.
-
-**RESONATOR** is a Rings-style modal/string resonator excited by the
-granulators. **FREQUENCY** locks to the grain chord, runs FREE on its own, or
-FREE quantized to the global **SCALE**; **STRUCTURE**, **BRIGHTNESS**,
-**DAMPING** and **POSITION** are the four macro controls Mutable Instruments
-Rings is built on. **MODE**, paired with STRUCTURE, switches between the
-MODAL bank and a Karplus-Strong **STRING** model. **GRAIN** rides the
-excitation's own envelope to add grit to the signal — silence in, silence
-out — a Mutable Elements-style "blow" that never hisses on its own.
-
-RESONATOR and DELAY are **MIX only** — SEND is gone. It held the dry at
-unity and let the wet ride on top, which mattered when a stage was the only
-way to get a dry signal past itself; SIGNAL's feeds do that properly now, and
-two mechanisms for one job is how a routing page stops being readable.
-
-Master is **mixer → COMP → REVERB → limiter**, and nothing else. There used to be a
-hidden mastering stage — expander, saturation, width, tape wobble — which
-measured well on a grain cloud and buffeted audibly on a clean signal passed
-straight through. A stage nobody can turn off has to be right for every signal
-that can reach it.
-
-GRAINSWARM 1 is the parent: **SCALE** is one setting for both, and GRAINSWARM
-2's **RATE** is a ratio of GRAINSWARM 1's. A small chain mark says so.
-
-### the capture is stereo
-
-Each granulator records into **two mono buffers**, left and right, because
-`GrainBuf` reads a mono buffer — "the buffer holding a mono audio signal",
-says its own help — and handing it a two-channel one reads the interleave as
-if it were a waveform. So **SRC** is:
-
-```
-STEREO     left to the left buffer, right to the right, kept apart
-MONO L     the left input, written to BOTH buffers
-```
 ```
 STEREO     left to the left buffer, right to the right, kept apart
 MONO L     the left input, written to BOTH buffers
