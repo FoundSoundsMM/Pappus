@@ -1107,9 +1107,15 @@ function sample_load(w, path)
   local ch, frames, rate = wav_info(path)
   if not ch then
     print("pappus: could not read " .. tostring(path))
-    smp[w] = {}
+    sample_release(w)
     return false
   end
+  -- WHERE SOS WAS BEFORE THE LOAD, so it can be handed back.
+  --
+  -- Loading a second sample on top of a first must not overwrite this with
+  -- the 1.0 the first load left behind: the number to keep is the one from
+  -- before any of this started.
+  local held_sos = smp[w].name and smp[w].sos or params:get(swid(w, "sos"))
   -- The file occupies `frames` BUFFER frames whatever its own rate, because
   -- nothing resamples on the way in - so BUFFR, which is measured in buffer
   -- frames at the server's rate, is frames/48000 and not the file's duration.
@@ -1119,12 +1125,31 @@ function sample_load(w, path)
     secs = secs,
     semi = (rate ~= SERVER_SR)
       and (12 * math.log(rate / SERVER_SR, 2)) or 0,
+    sos = held_sos,
   }
   engine.bufload(w, path)
-  -- and the three settings the load cannot leave alone - see the SAMPLES
-  -- note above for why each one has to move
+  -- and the settings the load cannot leave alone - see the SAMPLES note
+  -- above for why each one has to move
   params:set(swid(w, "src"), 1)          -- OFF: nothing writes over it
-  params:set(swid(w, "sos"), 1)          -- grains only, buffer held
+  -- LOCK, not just SOS at the top.
+  --
+  -- Both freeze the buffer - the engine takes max(SOS, LOCK) - and the
+  -- sample needs freezing, because below about 0.95 the write path feeds the
+  -- old content back at less than unity and the sample decays away over a
+  -- few passes even with nothing recording into it.
+  --
+  -- But SOS at the top is an INVISIBLE freeze: it is a bar on one cell, and
+  -- the granulator having stopped recording is not something you would read
+  -- off it. LOCK is the instrument's own freeze and it says so in the header
+  -- in place of the page name. Leaving the buffer held by a state you cannot
+  -- see is how "I turned SRC back on and nothing records" happens - which it
+  -- did, because SOS was still pinned at the top from a load.
+  --
+  -- SOS still goes up, because it is also the BLEND and at the bottom you
+  -- hear the input going past rather than the grains. It is just no longer
+  -- the thing doing the holding, and it is given back below.
+  params:set(swid(w, "sos"), 1)          -- grains only, not silence
+  params:set(swid(w, "lock"), 2)         -- ...and the freeze, where it shows
   params:set(swid(w, "buflen"), secs)
   send_voices(w)                         -- the rate correction, to the engine
   if frames > (BUFDUR * SERVER_SR) then
@@ -1134,15 +1159,33 @@ function sample_load(w, path)
   return true
 end
 
--- ...and forget it again. The buffer is wiped rather than left holding the
--- sample, because "no sample" that still granulates the last one is a lie the
--- waveform display would go on telling.
+-- STOP BEING A SAMPLE, without touching the audio.
+--
+-- Everything the load moved to hold the file still goes back: LOCK off, SOS
+-- to whatever it was before. That is what makes SRC -> STEREO a real way
+-- back rather than a setting that appears to arm an input the granulator is
+-- still frozen against.
+--
+-- BUFFR is deliberately NOT restored. It is the one of the four that is
+-- musically meaningful on its own - it is the loop length you are now
+-- working with - and snapping it back to eight seconds under someone who has
+-- been playing a two second sample would be the surprise, not the courtesy.
+function sample_release(w)
+  w = w or 1
+  local prev = smp[w].sos
+  smp[w] = {}
+  params:set(swid(w, "lock"), 1)
+  if prev then params:set(swid(w, "sos"), prev) end
+  send_voices(w)
+end
+
+-- ...and forget it again, audio included. The buffer is wiped rather than
+-- left holding the sample, because "no sample" that still granulates the last
+-- one is a lie the waveform display would go on telling.
 function sample_clear(w)
   w = w or 1
-  smp[w] = {}
   if engine.bufwipe then engine.bufwipe(w) end
-  params:set(swid(w, "sos"), 0)
-  send_voices(w)
+  sample_release(w)
 end
 
 -- Bresenham/Bjorklund euclidean distribution: k onsets spread over n steps.
@@ -2450,10 +2493,7 @@ local function add_params()
     -- is NOT wiped - the input is about to record over it anyway, and wiping
     -- would drop a beat of silence in first - but the name and the rate
     -- correction go, because from here on what is in there is a recording.
-    if x > 1 and smp[1].name then
-      smp[1] = {}
-      send_voices(1)
-    end
+    if x > 1 and smp[1].name then sample_release(1) end
   end)
 
   -- LOAD A SAMPLE into this granulator's buffer instead of recording one.
@@ -2639,10 +2679,7 @@ local function add_params()
     -- is NOT wiped - the input is about to record over it anyway, and wiping
     -- would drop a beat of silence in first - but the name and the rate
     -- correction go, because from here on what is in there is a recording.
-    if x > 1 and smp[2].name then
-      smp[2] = {}
-      send_voices(2)
-    end
+    if x > 1 and smp[2].name then sample_release(2) end
   end)
 
   -- LOAD A SAMPLE into this granulator's buffer instead of recording one.
@@ -3529,7 +3566,8 @@ local function scene_capture()
   sc.smp = {}
   for w = 1, 2 do
     if smp[w].name then
-      sc.smp[w] = { name = smp[w].name, semi = smp[w].semi or 0 }
+      sc.smp[w] = { name = smp[w].name, semi = smp[w].semi or 0,
+                    sos = smp[w].sos }
     end
   end
   return sc
@@ -3591,7 +3629,8 @@ local function scene_apply(sc)
   -- patch's sample name hanging over someone else's audio.
   for w = 1, 2 do
     local u = sc.smp and sc.smp[w]
-    smp[w] = u and { name = u.name, secs = nil, semi = u.semi or 0 } or {}
+    smp[w] = u and { name = u.name, secs = nil, semi = u.semi or 0,
+                     sos = u.sos } or {}
   end
   send_voices()
   send_voices(2)

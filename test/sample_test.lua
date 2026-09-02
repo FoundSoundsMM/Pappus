@@ -174,6 +174,68 @@ do
   check(params:get("m_src") == 1, "the file param did not turn SOURCE off")
 end
 
+-- ---------------------------------------------------------- CAN IT RECORD?
+--
+-- The regression this exists for: loading a sample pinned SOS to the top and
+-- never gave it back, and SOS at the top is the engine's FREEZE - the write
+-- gain is `((1 - sos) * 4).clip(0, 1)`, which is exactly zero there. So after
+-- any sample load, turning SRC back to a live input armed an input that the
+-- granulator was still frozen against, and nothing recorded. Silently, with
+-- nothing on screen to say why.
+--
+-- The engine takes max(SOS, LOCK), so "is this granulator able to record" is
+-- that max being under one, and it is checked from the values the engine was
+-- actually sent rather than from the params.
+local function recording(w)
+  local L = mock.calls.last
+  local sos = L[(w == 1) and "msos" or "nsos"]
+  local lock = L[(w == 1) and "mlock" or "nlock"]
+  local src = L[(w == 1) and "msrc" or "nsrc"]
+  local held = math.max(sos and sos[1] or 0, lock and lock[1] or 0)
+  return (src and src[1] or 1) > 1 and held < 1
+end
+
+do
+  params:set("m_src", 2)
+  params:set("m_sos", 0.35)
+  check(recording(1), "not recording before the load - bad starting state")
+
+  check(sample_load(1, S48), "load returned false")
+  check(not recording(1), "the loaded sample is not being held")
+  check(params:get("m_lock") == 2, "LOCK is not on, so the freeze is invisible")
+
+  -- THE WAY BACK, as the README describes it
+  params:set("m_src", 2)
+  check(recording(1),
+    "SRC back to STEREO left the granulator frozen - it cannot record")
+  near(params:get("m_sos"), 0.35, 1e-6, "SOS was not handed back")
+  check(params:get("m_lock") == 1, "LOCK was not released")
+end
+
+-- ...and the other way back: clearing the sample
+do
+  params:set("m_sos", 0.5)
+  params:set("m_src", 2)
+  check(sample_load(1, S48), "second load returned false")
+  sample_clear(1)
+  near(params:get("m_sos"), 0.5, 1e-6, "clear did not hand SOS back")
+  check(params:get("m_lock") == 1, "clear did not release LOCK")
+  params:set("m_src", 2)
+  check(recording(1), "cleared, armed, and still cannot record")
+end
+
+-- Loading a SECOND sample on top of a first must not learn 1.0 as "where SOS
+-- was" - the number to keep is the one from before any of it started.
+do
+  params:set("m_src", 2)
+  params:set("m_sos", 0.22)
+  check(sample_load(1, S48), "load A returned false")
+  check(sample_load(1, S441), "load B returned false")
+  params:set("m_src", 2)
+  near(params:get("m_sos"), 0.22, 1e-6,
+    "a second load overwrote the remembered SOS")
+end
+
 -- A SNAPSHOT carries the sample identity, because the audio alone does not.
 -- The wav a snapshot writes is the buffer at the server's rate, so the frames
 -- come back exactly as they went in - and so does the correction they need.

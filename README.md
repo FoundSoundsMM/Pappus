@@ -127,10 +127,13 @@ input. Everything downstream is unchanged — GRAINSWARM does not know or care
 where the samples in its buffer came from — so a sample is granulated,
 resonated, delayed and coloured by exactly the controls a recording is.
 
-Choosing a file moves three things, and it has to:
+Choosing a file moves four things, and it has to:
 
 ```
 SRC     to OFF        or the live input records over it immediately
+LOCK    on            the freeze that holds the sample - below about 0.95 the
+                      write path feeds the old content back at less than
+                      unity and the file decays away over a few passes
 SOS     to the top    SOS is also the blend, and at the bottom you hear the
                       input going past rather than the grains - which, with
                       SRC off, is silence
@@ -138,10 +141,21 @@ BUFFR   to its length so the playhead and the window span the file rather
                       than the file plus fifty seconds of nothing
 ```
 
-All three are ordinary cells afterwards. Turning **SRC** back to STEREO
-resumes recording over the sample, which is the way back; **1 clear sample**
-wipes the buffer instead. While a sample is loaded, the source reads as the
+Turning **SRC** back to a live input is the way back, and it hands all of that
+back with it: LOCK off, SOS to wherever you had it before the load, and the
+granulator recording again. **1 clear sample** does the same and wipes the
+buffer as well. BUFFR is the one that stays — it is the loop length you are
+now working with, and snapping it back to eight seconds under someone playing
+a two second sample would be the surprise, not the courtesy.
+
+While a sample is loaded the header says **LOCK**, and the source reads as the
 file's name rather than NO INPUT.
+
+> The freeze is LOCK rather than SOS-at-the-top on purpose. The engine takes
+> `max(SOS, LOCK)`, so either one holds the buffer — but SOS at the top is an
+> *invisible* freeze, a bar on one cell, and a granulator that has silently
+> stopped recording is not something you would read off it. LOCK says so in
+> the header.
 
 Stereo files stay stereo — one channel into each of the pair — and mono files
 go to both sides, centred, exactly like MONO L does on the live input.
