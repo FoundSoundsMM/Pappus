@@ -117,6 +117,42 @@ IN L+R     both inputs, averaged
 LEFT       the left input only
 RIGHT      the right input only
 ```
+
+### loading a sample
+
+PARAMS > GRAINSWARM > **1 sample** (and **2 sample** for the second
+granulator) fills that granulator's buffer from a file instead of from the
+input. Everything downstream is unchanged — GRAINSWARM does not know or care
+where the samples in its buffer came from — so a sample is granulated,
+resonated, delayed and coloured by exactly the controls a recording is.
+
+Choosing a file moves three things, and it has to:
+
+```
+SRC     to OFF        or the live input records over it immediately
+SOS     to the top    SOS is also the blend, and at the bottom you hear the
+                      input going past rather than the grains - which, with
+                      SRC off, is silence
+BUFFR   to its length so the playhead and the window span the file rather
+                      than the file plus fifty seconds of nothing
+```
+
+All three are ordinary cells afterwards. Turning **SRC** back to STEREO
+resumes recording over the sample, which is the way back; **1 clear sample**
+wipes the buffer instead. While a sample is loaded, the source reads as the
+file's name rather than NO INPUT.
+
+Stereo files stay stereo — one channel into each of the pair — and mono files
+go to both sides, centred, exactly like MONO L does on the live input.
+Nothing resamples on the way in, so a file that is not 48 kHz would play
+sharp or flat; the difference is measured from the header and taken out of
+every voice's pitch, so a 44.1 kHz sample plays at the pitch it was recorded
+at. Anything past sixty seconds is truncated to the buffer.
+
+A **snapshot** saves the loaded audio the same way it saves a recording — it
+writes the buffer out either way — and carries the file's name and its rate
+correction with it.
+
 ## controls
 
 - **K2** back a page, **K3** forward, within the current lane. **Long K2** puts the selected parameter back to its default and takes any modulator off it.
@@ -147,3 +183,36 @@ Notes in: PARAMS > MIDI > **notes**. Notes drive GRAINSWARM 1.
 The grid chord is put back untouched when **notes** returns to off. **velocity to level** maps velocity onto the voice's level; turn it off for a controller that does not send velocity.
 
 CC mapping: norns' own. In PARAMS, hold **K1** and press **K3**.
+
+## performance
+
+PARAMS > PERFORMANCE.
+
+On a norns the screen and the encoders are served by the **same thread**, so a
+frame that takes too long does not merely drop a frame — it holds the encoder
+queue shut, and what you feel is a knob that does nothing and then jumps
+several steps at once. A shield with a Pi 4 in it has the headroom to draw
+these pages at twenty-five a second; a factory norns, on a Pi 3, does not
+always.
+
+- **screen fps** — 25 (default), 20, 15 or 10. Nothing about the instrument
+  changes: every animation advances by elapsed time, so at 15 the same motion
+  is drawn less often rather than more slowly. Fifteen is still smooth for
+  what is on these pages and is a forty per cent cut in everything the screen
+  costs.
+- **grid fps** — 25 (default), 15 or 10. Separate because the grid is a
+  different bottleneck: not cairo, but up to 128 LED writes and a serial
+  frame. The display already skips a refresh entirely when nothing on the grid
+  moved; this caps how often it may send one when things are moving.
+
+If you are seeing high CPU or hearing clicks on a factory norns, the other
+things worth knowing:
+
+- **audio/** is scanned at load and every `.wav` in it becomes a NOISE type
+  and a RESONATOR GRAIN type. The files are held in memory for the whole
+  session, so a folder full of long loops is a folder full of resident RAM.
+- Every capture buffer is **sixty seconds**, four of them, whatever BUFFR is
+  set to. That is fixed at load, not per patch.
+- **LOSS** is the single most expensive control in the engine — it is a real
+  short-time Fourier transform — but it costs the same whether the knob is up
+  or down.

@@ -14,6 +14,8 @@
 Engine_Pappus : CroneEngine {
 	var <synth, <buf, <bufr, <buf2, <buf2r, <dbuf, <envbufs, <patbuf, <patbuf2, <mbus;
 	var <loopbufs;
+	// the seven meters' last shared bus read, and when it was taken
+	var mlast, mtime = 0;
 	var bufdur = 60.0;
 	var deldur = 11.0;
 
@@ -123,6 +125,7 @@ Engine_Pappus : CroneEngine {
 		//   4 DELAY        5 COLOUR         6 REVERB
 		//   7 OUT
 		mbus = Bus.control(srv, 7);
+		mlast = Array.fill(7, 0);
 		srv.sync;
 
 		envbufs.do { arg b, i;
@@ -826,14 +829,28 @@ Engine_Pappus : CroneEngine {
 			pgwash = Select.ar((pgraintype - 1).clip(0, 2),
 				[WhiteNoise.ar(1), PinkNoise.ar(1.6), Dust2.ar(1800)]);
 			pgwash = BPF.ar(pgwash, 2200, 0.5);
+			// ONE PlayBuf, pointed at the CHOSEN buffer, rather than one
+			// PlayBuf per file with a Select on the outputs.
+			//
+			// The old shape built a stereo PlayBuf for every .wav in audio/
+			// and threw all but one of them away every block. Five files out
+			// of the box meant five stereo interpolated buffer reads here and
+			// five more down in NOISE - ten permanently-running streams over
+			// ~30 MB of buffer, which on a Pi 3 costs far more in memory
+			// bandwidth than it does in arithmetic. It also scaled the wrong
+			// way: a user who dropped twenty loops into audio/ silently
+			// bought forty of them.
+			//
+			// PlayBuf's bufnum is a modulatable input, so selecting the
+			// BUFFER NUMBER at control rate and reading it once does exactly
+			// the same job at a cost that no longer depends on how many files
+			// are in the folder. Switching mid-play keeps the phase and wraps
+			// it into the new buffer, which is what sc_loop does anyway.
 			if(loopbufs.size > 0) {
 				var sel = (pgraintype - 4).clip(0, loopbufs.size - 1);
-				var sigs = loopbufs.collect({ arg b;
-					var s = PlayBuf.ar(2, b.bufnum,
-						BufRateScale.kr(b.bufnum), loop: 1);
-					(s[0] + s[1]) * 0.5;
-				});
-				pgloop = Select.ar(sel, sigs);
+				var bn = Select.kr(sel, loopbufs.collect({ arg b; b.bufnum }));
+				var s = PlayBuf.ar(2, bn, BufRateScale.kr(bn), loop: 1);
+				pgloop = (s[0] + s[1]) * 0.5;
 				pglp = Lag.kr(pgraintype > 3.5, 0.05);
 			} {
 				pgloop = DC.ar(0);
@@ -1177,10 +1194,32 @@ Engine_Pappus : CroneEngine {
 			// what two would - this is the most expensive thing in the engine.
 			// ...and this is the CRUSHED signal now, not the compressed one
 			lmono = (sig[0] + sig[1]) * 0.5;
-			lchain = FFT(LocalBuf(512).clear, lmono, 0.25, 1);
-			// bin magnitudes scale with window size; 128 is a Hann-windowed
-			// 512-point FFT's peak bin for a full-scale sine
-			lthr = Amplitude.kr(lmono, 0.02, 0.15) * 128 * ls.squared * 0.45;
+			// HOP 0.5 WITH A SINE WINDOW, not 0.25 with a Hann one.
+			//
+			// SC windows on analysis AND again on synthesis, so what has to
+			// sum to a constant is the SQUARE of the window at the chosen
+			// hop. Hann-squared is constant-overlap-add at 75% overlap, which
+			// is what hop 0.25 was for and why it was correct - it was also
+			// four transforms per window instead of two, on what the comment
+			// above already calls the most expensive thing in the engine.
+			//
+			// Sine-squared is COLA at 50% overlap: sin^2 + cos^2 = 1, exactly.
+			// So this is the other textbook-correct pair, reconstruction is
+			// still sample-exact through the dry parts of the knob, and it
+			// costs HALF - 375 transforms a second instead of 750. The window
+			// is a little wider in frequency, which on an effect whose whole
+			// job is to punch holes in the spectrum is not a cost worth
+			// paying twice the CPU to avoid.
+			lchain = FFT(LocalBuf(512).clear, lmono, 0.5, 0);
+			// Bin magnitudes scale with the window's COHERENT GAIN as well as
+			// its size, so this constant moved with the window above. A
+			// Hann-windowed 512-point FFT puts a full-scale sine's peak bin
+			// at N/2 x 0.5 = 128; a sine window's coherent gain is 2/pi, so
+			// the same tone now peaks at 256 x 0.6366 = 163. Left at 128 the
+			// threshold would sit a quarter of the way low and LOSS would
+			// quietly have got weaker across its whole travel - the knob has
+			// to mean what it meant.
+			lthr = Amplitude.kr(lmono, 0.02, 0.15) * 163 * ls.squared * 0.45;
 			lchain = PV_MagAbove(lchain, lthr);
 			// Bandwidth holds up until the knob is well past halfway and only
 			// then falls off a cliff, which is how bitrate actually behaves -
@@ -1228,24 +1267,22 @@ Engine_Pappus : CroneEngine {
 			// playback rate, not a filter centre, so turning it down slows
 			// and drops a loop and turning it up speeds it up and raises it.
 			// 1200 Hz, the knob's resting value, is each file's own recorded
-			// speed. One rate control for all of them, and NLOOPN of them
-			// running at once regardless of which is selected - that is the
-			// same "always compute, only pick at the end" shape WHITE/PINK/
-			// DUST already use above, just over a list whose length is not
-			// known until the folder is scanned.
+			// speed. One rate control for all of them, and ONE PlayBuf
+			// pointed at whichever buffer is selected - see the same change
+			// up in RESONATOR's GRAIN TYPE for why. "Always compute, only
+			// pick at the end" is the right shape for WHITE/PINK/DUST, which
+			// are three cheap generators; it is the wrong shape for a list of
+			// multi-megabyte files whose length the user controls, where it
+			// meant every loop in the folder was permanently streaming out of
+			// DRAM so that one of them could be heard.
 			if(loopbufs.size > 0) {
-				var nloopn = loopbufs.size;
-				var nloopsigs;
-				nloopsel = (noisetype - 4).clip(0, nloopn - 1);
+				var nbn;
+				nloopsel = (noisetype - 4).clip(0, loopbufs.size - 1);
 				nlooprate = Lag.kr(noisetone, 0.05) / 1200;
-				nloopsigs = loopbufs.collect({ arg b;
-					PlayBuf.ar(2, b.bufnum,
-						nlooprate * BufRateScale.kr(b.bufnum), loop: 1);
-				});
-				nloop = [
-					Select.ar(nloopsel, nloopsigs.collect({ arg s; s[0] })),
-					Select.ar(nloopsel, nloopsigs.collect({ arg s; s[1] }))
-				];
+				nbn = Select.kr(nloopsel,
+					loopbufs.collect({ arg b; b.bufnum }));
+				nloop = PlayBuf.ar(2, nbn,
+					nlooprate * BufRateScale.kr(nbn), loop: 1);
 				// Unmeasured and un-levelled: a file dropped into audio/ has
 				// not been matched to anything, so this is only a sanity
 				// gain against the washes' own level, not a promise.
@@ -1603,9 +1640,23 @@ Engine_Pappus : CroneEngine {
 		// once fired in a test. The Lua side is written to notice: a meter that
 		// has never received a value draws a dash, not a zero, so a failure on
 		// hardware reads as "no data" instead of as "this module is silent".
+		//
+		// ONE bus read shared by all seven, not seven of them. The polls fire
+		// as a batch, so the naive version did getnSynchronous(7) seven times
+		// per round - forty-nine float reads and seven throwaway Arrays - to
+		// answer seven questions about the same seven numbers. Caching the
+		// read for a few milliseconds makes a round cost one of each. sclang
+		// is the process norns runs its polls, its OSC and its engine
+		// commands in, and on a Pi 3 it is what starves scsynth into
+		// clicking long before scsynth runs out of DSP time.
 		7.do { arg i;
 			this.addPoll(("meter" ++ (i + 1)).asSymbol, {
-				mbus.getnSynchronous(7)[i];
+				var now = Main.elapsedTime;
+				if(now - mtime > 0.005) {
+					mlast = mbus.getnSynchronous(7);
+					mtime = now;
+				};
+				mlast[i];
 			});
 		};
 		// wipe the capture buffer - a new project starts on silence, not on
@@ -1646,6 +1697,66 @@ Engine_Pappus : CroneEngine {
 			// not exist yet either.
 			this.prMakeDir(path.dirname);
 			b.write(path, "wav", "int16", n, 0, false);
+		});
+		// LOAD A SAMPLE into a granulator's capture buffer pair, in place of
+		// recording one. Same destination the input writes to and the same
+		// destination a snapshot restores into - GRAINSWARM does not care
+		// where the samples in its buffer came from, so this is a different
+		// way of filling it rather than a different mode of running.
+		//
+		// Lua turns SOURCE off before calling, so nothing overwrites what
+		// lands here; see the note by `bufload` in pappus.lua.
+		this.addCommand("bufload", "is", { arg msg;
+			var w = msg[1].asInteger.clip(1, 2);
+			var path = msg[2].asString;
+			var bl = if(w == 1) { buf } { buf2 };
+			var br = if(w == 1) { bufr } { buf2r };
+			var sf, nfr, nch;
+			if(File.exists(path)) {
+				sf = SoundFile.new;
+				if(sf.openRead(path)) {
+					// read both off the handle BEFORE closing it, rather
+					// than trusting the ivars to survive
+					nch = sf.numChannels;
+					nfr = sf.numFrames.min(bl.numFrames);
+					sf.close;
+					// ZERO FIRST. A four second sample dropped into a sixty
+					// second buffer otherwise leaves whatever was in there
+					// beyond its end - and BUFFR is a knob, so winding it
+					// past the sample would bring the old recording back
+					// underneath it.
+					bl.zero; br.zero;
+					if(nch > 1) {
+						// One channel each, NOT a plain read of both. b_read
+						// of a stereo file into a mono buffer lands the
+						// INTERLEAVE in the buffer, and the grains then read
+						// the left/right alternation as if it were a
+						// waveform - the same reason the capture is two mono
+						// buffers rather than one stereo one.
+						bl.readChannel(path, 0, nfr, 0, false, [0]);
+						br.readChannel(path, 0, nfr, 0, false, [1]);
+					} {
+						// mono file: both sides get it, so it arrives
+						// centred rather than stacked against one speaker,
+						// exactly as MONO L does on the live input
+						bl.read(path, 0, nfr, 0, false);
+						br.read(path, 0, nfr, 0, false);
+					};
+					("Engine_Pappus: loaded " ++ nfr ++ " frames into swarm "
+						++ w).postln;
+				} {
+					("Engine_Pappus: could not open " ++ path).postln;
+				};
+			} {
+				("Engine_Pappus: no such file: " ++ path).postln;
+			};
+		});
+		// ...and back out again, one granulator at a time. bufclear wipes all
+		// four buffers and is what a snapshot recall wants; this is what
+		// "forget the sample I loaded into GRAINSWARM 2" wants.
+		this.addCommand("bufwipe", "i", { arg msg;
+			var w = msg[1].asInteger.clip(1, 2);
+			if(w == 1) { buf.zero; bufr.zero } { buf2.zero; buf2r.zero };
 		});
 		this.addCommand("snapread", "is", { arg msg;
 			var b = [buf, bufr, buf2, buf2r][(msg[1] - 1).clip(0, 3)];

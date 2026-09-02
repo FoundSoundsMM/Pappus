@@ -45,7 +45,13 @@ local BUFDUR = 60.0
 local BUFLEN_MIN, BUFLEN_MAX = 2.0, 60.0
 local WAVE_N = 128        -- one waveform slot per screen column
 local NVOICE = 8
+-- Screen and grid refresh rates. Both are params (see PERFORMANCE) rather
+-- than constants, because what a Pi 4 shield can draw at twenty-five a
+-- factory norns cannot always, and on norns the screen and the encoders are
+-- served by the same thread - a frame that overruns is felt as an encoder
+-- that stalls and then jumps.
 local FPS = 25
+local GRID_FPS = 25
 local MAX_MARKS = 96
 
 -- RATE / DELAY SYNC divisions. the S-4 calls one bar "1/1", so 1/4 is a beat.
@@ -260,6 +266,100 @@ SWP = { "m_", "n_" }
 function swid(w, name)
   if name == "scale" then return "m_scale" end
   return SWP[w or 1] .. name
+end
+
+-- ---------------------------------------------------------------------------
+-- SAMPLES
+--
+-- A granulator's buffer can be FILLED FROM A FILE instead of from the input.
+-- Nothing downstream changes: GRAINSWARM does not know or care where the
+-- samples in its buffer came from, so this is a second way of getting audio
+-- in there rather than a second mode of running. A snapshot taken afterwards
+-- saves the loaded audio exactly as it saves a recording, because it is
+-- writing the same buffer out either way.
+--
+-- Three things have to move with the load, and none of them is optional:
+--
+--   SOURCE goes to OFF, or the live input starts writing over the sample the
+--          moment it lands. OFF is not "silence recorded over the top" - the
+--          write is gated shut and the buffer holds - which is exactly what
+--          a loaded sample needs.
+--   SOS    goes to 1, because SOS is also the blend: at 0 you hear the input
+--          going past rather than the grains, and with SOURCE off that input
+--          is silence. Loading a file and hearing nothing is not a state
+--          worth shipping.
+--   BUFFR  goes to the sample's own length, so the playhead and the window
+--          span the file rather than the file plus fifty seconds of silence.
+--
+-- All three are ordinary knobs on the page afterwards. Turning SOURCE back to
+-- STEREO resumes recording over the sample, which is the way back.
+local smp = { {}, {} }            -- per granulator: name, secs, semi
+
+-- norns runs its server at 48 kHz and Buffer.read does not resample: a 44.1 k
+-- file lands in the buffer frame for frame and therefore plays 8.8 per cent
+-- fast, which is a semitone and a half sharp. Correcting it is one number -
+-- the offset is added to every voice's pitch on the way to the engine, so the
+-- grains come out at the pitch the file was recorded at while RESONATOR,
+-- which is tuned from the chord rather than from this, stays where it was.
+local SERVER_SR = 48000
+
+-- Channel count, frame count and sample rate of a wav, without loading it.
+-- norns' own audio.file_info is used when it is there; the RIFF walk is the
+-- fallback, and is what the test suite runs against.
+function wav_info(path)
+  if audio and audio.file_info then
+    local ch, frames, rate = audio.file_info(path)
+    -- file_info returns -1 for a file it could not read
+    if ch and ch > 0 and frames and frames > 0 then
+      return ch, frames, (rate and rate > 0) and rate or SERVER_SR
+    end
+    return nil
+  end
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local function u(str, at, n)          -- little-endian unsigned
+    local v = 0
+    for i = n, 1, -1 do v = (v * 256) + str:byte(at + i - 1) end
+    return v
+  end
+  local hdr = f:read(12)
+  if not hdr or #hdr < 12 or hdr:sub(1, 4) ~= "RIFF"
+    or hdr:sub(9, 12) ~= "WAVE" then
+    f:close()
+    return nil
+  end
+  local ch, rate, bits, bytes
+  while true do
+    local c = f:read(8)
+    if not c or #c < 8 then break end
+    local id, sz = c:sub(1, 4), u(c, 5, 4)
+    if id == "fmt " then
+      local d = f:read(sz)
+      if not d or #d < 16 then break end
+      ch, rate, bits = u(d, 3, 2), u(d, 5, 4), u(d, 15, 2)
+    elseif id == "data" then
+      bytes = sz
+      break
+    else
+      -- chunks are word aligned: an odd size carries a pad byte
+      f:seek("cur", sz + (sz % 2))
+    end
+  end
+  f:close()
+  if not (ch and rate and bits and bytes) or ch < 1 or bits < 8 then
+    return nil
+  end
+  return ch, math.floor(bytes / (ch * (bits / 8))), rate
+end
+
+-- The pitch offset a loaded sample needs, in semitones, or 0 for a live
+-- buffer. Read by send_voices on its way to the engine.
+function sample_semi(w)
+  return smp[w or 1].semi or 0
+end
+
+function sample_name(w)
+  return smp[w or 1].name
 end
 
 -- MIDI note input. Notes drive the same eight voices the grid does, by
@@ -969,7 +1069,10 @@ local function send_voices(w)
   for i = 1, NVOICE do
     local st = G[i]
     local semi = base + st.semi + (OCTAVES[st.oct] * 12)
-    p[i] = snap_to_scale(semi, sc)
+    -- the sample rate correction is added AFTER the scale snap, not before:
+    -- it is a playback-speed compensation, not a note, and snapping it would
+    -- quantise the fix away and leave the file sharp again
+    p[i] = snap_to_scale(semi, sc) + sample_semi(w)
     gt[i] = st.on and st.lvl or 0
     pr[i] = st.prob
   end
@@ -989,6 +1092,57 @@ local function send_voices(w)
   -- Only when SLICE is continuous: on a slow slice the whole point is that
   -- the bank keeps the chord it caught until the next tick.
   if send_bank and params:get("p_freeze") ~= 2 then send_bank() end
+end
+
+-- LOAD. Reads the header here so BUFFR and the rate correction are known
+-- before the engine is asked for anything, and so an unreadable file is
+-- reported rather than silently dropped into the buffer.
+--
+-- The engine does the actual read: it is the side that owns the buffers, and
+-- Buffer.readChannel is what keeps a stereo file's two sides apart instead of
+-- landing the interleave in a mono buffer.
+function sample_load(w, path)
+  w = w or 1
+  if not path or path == "" or path == "-" then return false end
+  local ch, frames, rate = wav_info(path)
+  if not ch then
+    print("pappus: could not read " .. tostring(path))
+    smp[w] = {}
+    return false
+  end
+  -- The file occupies `frames` BUFFER frames whatever its own rate, because
+  -- nothing resamples on the way in - so BUFFR, which is measured in buffer
+  -- frames at the server's rate, is frames/48000 and not the file's duration.
+  local secs = util.clamp(frames / SERVER_SR, BUFLEN_MIN, BUFLEN_MAX)
+  smp[w] = {
+    name = path:match("([^/]+)$") or path,
+    secs = secs,
+    semi = (rate ~= SERVER_SR)
+      and (12 * math.log(rate / SERVER_SR, 2)) or 0,
+  }
+  engine.bufload(w, path)
+  -- and the three settings the load cannot leave alone - see the SAMPLES
+  -- note above for why each one has to move
+  params:set(swid(w, "src"), 1)          -- OFF: nothing writes over it
+  params:set(swid(w, "sos"), 1)          -- grains only, buffer held
+  params:set(swid(w, "buflen"), secs)
+  send_voices(w)                         -- the rate correction, to the engine
+  if frames > (BUFDUR * SERVER_SR) then
+    print(string.format("pappus: %s is longer than the %ds buffer, truncated",
+      smp[w].name, math.floor(BUFDUR)))
+  end
+  return true
+end
+
+-- ...and forget it again. The buffer is wiped rather than left holding the
+-- sample, because "no sample" that still granulates the last one is a lie the
+-- waveform display would go on telling.
+function sample_clear(w)
+  w = w or 1
+  smp[w] = {}
+  if engine.bufwipe then engine.bufwipe(w) end
+  params:set(swid(w, "sos"), 0)
+  send_voices(w)
 end
 
 -- Bresenham/Bjorklund euclidean distribution: k onsets spread over n steps.
@@ -1498,9 +1652,42 @@ end
 -- right about why: it only bit while the chord or MORPH were already moving,
 -- so on a held chord the knob did nothing at all. A control that is inert
 -- unless something else is happening is not a control.
+-- The bank's inputs, as a set. Everything the layout reads that a MODULATOR
+-- can reach: the four RESONATOR knobs, the scale, and the two chord
+-- transposes. The chord itself is not here - a chord change comes through
+-- send_voices, which re-lays the bank on the spot.
+local BANK_DEPS = {
+  p_freq = true, p_freqmode = true, p_structure = true,
+  p_bright = true, p_pos = true,
+  m_scale = true, m_pitch = true, n_pitch = true,
+  -- ...and the two DRY IN feeds, because which of them is larger is what
+  -- decides WHICH granulator's chord the bank follows
+  p_in1 = true, p_in2 = true,
+}
+
+-- ONLY WHEN A MODULATOR IS ON IT.
+--
+-- Laying the bank out is forty-eight resonators' worth of scale snapping,
+-- powers and sines, and it was being run sixty times a second unconditionally
+-- - on the same thread as the redraw and the encoders - to discover, almost
+-- always, that nothing had moved. Every knob that feeds the layout already
+-- re-lays it from its own action, and mod_apply calls those actions with the
+-- modulated value, so a modulated FREQUENCY or BRIGHTNESS re-tunes the bank
+-- whether this tick runs or not.
+--
+-- What this is still here for is the case the actions cannot cover on their
+-- own: a destination whose value is moving but whose quantised send has not
+-- changed, and anything else that reaches the layout sideways. So it runs
+-- when something is modulating one of the bank's inputs, and does not when
+-- nothing is - which is the state a patch is in almost all of the time.
 function spettru_tick(dt)
   if params:get("p_freeze") == 2 then return end
-  send_bank()
+  for id in pairs(BANK_DEPS) do
+    if mod_targets(id) then
+      send_bank()
+      return
+    end
+  end
 end
 
 function spettru_band_hz(i)
@@ -1728,7 +1915,13 @@ end
 -- Not the raw option names. "OFF" on a waveform that is not moving says
 -- nothing about WHY; "NO INPUT" says what is wrong and "STEREO IN" says what
 -- is happening, which is the same information a mixer prints on a channel.
-function src_label(i)
+-- ...and OFF reads as the SAMPLE's name when a file has been loaded into
+-- that granulator, because "NO INPUT" over a buffer full of a sample you
+-- just chose is the one thing on this page that would be actively wrong.
+function src_label(i, w)
+  if i == 1 and w and sample_name(w) then
+    return (sample_name(w):gsub("%.[Ww][Aa][Vv]$", ""):upper())
+  end
   return ({ "NO INPUT", "STEREO IN", "MONO L", "MONO R" })[i] or "NO INPUT"
 end
 
@@ -2251,7 +2444,34 @@ local function add_params()
   -- than stacked against one speaker.
   params:add_option("m_src", "1 source",
     { "OFF", "STEREO", "MONO L", "MONO R" }, 1)
-  params:set_action("m_src", function(x) engine.msrc(x) end)
+  params:set_action("m_src", function(x)
+    engine.msrc(x)
+    -- Choosing a live input is how you say "stop being a sample". The buffer
+    -- is NOT wiped - the input is about to record over it anyway, and wiping
+    -- would drop a beat of silence in first - but the name and the rate
+    -- correction go, because from here on what is in there is a recording.
+    if x > 1 and smp[1].name then
+      smp[1] = {}
+      send_voices(1)
+    end
+  end)
+
+  -- LOAD A SAMPLE into this granulator's buffer instead of recording one.
+  -- A file param rather than a cell: picking a file needs the browser, and
+  -- there is no room on the page for one. See the SAMPLES note near the top
+  -- for what the load moves and why.
+  params:add_file("m_sample", "1 sample", _path.audio)
+  params:set_action("m_sample", function(f)
+    -- A file param's DEFAULT is the folder it opens in, and params:bang()
+    -- fires every action at startup with whatever it is holding - so "no
+    -- file chosen" arrives here as a directory, not as an empty string, and
+    -- has to be turned away without reporting a failure nobody caused.
+    if f == nil or f == "" or f == "-" or f:sub(-1) == "/" then return end
+    sample_load(1, f)
+  end)
+
+  params:add_trigger("m_sample_clear", "1 clear sample")
+  params:set_action("m_sample_clear", function() sample_clear(1) end)
 
   -- sound on sound. 0 records normally, the middle layers new over old with
   -- the old decaying each pass, and the very top is a true freeze.
@@ -2413,7 +2633,34 @@ local function add_params()
   -- the option survived as a setting that silently recorded nothing.
   params:add_option("n_src", "2 source",
     { "OFF", "STEREO", "MONO L", "MONO R" }, 1)
-  params:set_action("n_src", function(x) engine.nsrc(x) end)
+  params:set_action("n_src", function(x)
+    engine.nsrc(x)
+    -- Choosing a live input is how you say "stop being a sample". The buffer
+    -- is NOT wiped - the input is about to record over it anyway, and wiping
+    -- would drop a beat of silence in first - but the name and the rate
+    -- correction go, because from here on what is in there is a recording.
+    if x > 1 and smp[2].name then
+      smp[2] = {}
+      send_voices(2)
+    end
+  end)
+
+  -- LOAD A SAMPLE into this granulator's buffer instead of recording one.
+  -- A file param rather than a cell: picking a file needs the browser, and
+  -- there is no room on the page for one. See the SAMPLES note near the top
+  -- for what the load moves and why.
+  params:add_file("n_sample", "2 sample", _path.audio)
+  params:set_action("n_sample", function(f)
+    -- A file param's DEFAULT is the folder it opens in, and params:bang()
+    -- fires every action at startup with whatever it is holding - so "no
+    -- file chosen" arrives here as a directory, not as an empty string, and
+    -- has to be turned away without reporting a failure nobody caused.
+    if f == nil or f == "" or f == "-" or f:sub(-1) == "/" then return end
+    sample_load(2, f)
+  end)
+
+  params:add_trigger("n_sample_clear", "2 clear sample")
+  params:set_action("n_sample_clear", function() sample_clear(2) end)
 
   params:add_control("n_sos", "2 sos",
     controlspec.new(0, 1, "lin", 0, 0, ""))
@@ -2901,6 +3148,40 @@ local function add_params()
   -- monitor path would double it
   params:add_option("monitor", "norns in>out monitor", { "off", "on" }, 1)
   params:set_action("monitor", function(x) audio.level_monitor(x == 2 and 1 or 0) end)
+
+  params:add_separator("perf", "PERFORMANCE")
+
+  -- SCREEN FPS.
+  --
+  -- On a norns, every screen call and every encoder event are handled by the
+  -- SAME thread. A frame that takes too long does not merely drop a frame -
+  -- it holds the encoder queue shut, and what you feel is a knob that does
+  -- nothing and then jumps several steps at once when the thread comes back.
+  -- A shield with a Pi 4 in it has the headroom to draw these pages at
+  -- twenty-five; a factory norns, on a Pi 3, does not always.
+  --
+  -- Nothing about the instrument changes with this - the animation is all
+  -- time-based and advances by dt - it is the number of times a second the
+  -- picture is rebuilt. Fifteen is still smooth for what is on these pages
+  -- and is a forty per cent cut in everything the screen costs.
+  params:add_option("fps", "screen fps", { "25", "20", "15", "10" }, 1)
+  params:set_action("fps", function(x)
+    FPS = ({ 25, 20, 15, 10 })[x] or 25
+    if ui_metro then
+      ui_metro.time = 1 / FPS
+      ui_metro:start()
+    end
+  end)
+
+  -- GRID FPS, separately, because the grid is a different bottleneck: it is
+  -- not cairo, it is up to a hundred and twenty-eight LED writes and a serial
+  -- frame per refresh. The display already skips a refresh when nothing on
+  -- the grid moved; this caps how often it may send one when things ARE
+  -- moving.
+  params:add_option("grid_fps", "grid fps", { "25", "15", "10" }, 1)
+  params:set_action("grid_fps", function(x)
+    GRID_FPS = ({ 25, 15, 10 })[x] or 25
+  end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -3237,6 +3518,20 @@ local function scene_capture()
   for i = 1, NTAP do
     sc.t[i] = { step = manual[i].step, on = manual[i].on }
   end
+  -- WHICH SAMPLE, if either buffer is holding one.
+  --
+  -- Not so the file can be reloaded - the snapshot writes the buffer itself
+  -- out, so the audio is already coming back - but so the two things the load
+  -- set that the audio does not carry come back with it: the name shown in
+  -- place of the source, and the sample-rate correction. Restore the frames
+  -- without the correction and a 44.1k sample comes back a semitone and a
+  -- half sharp from the slot you saved it flat in.
+  sc.smp = {}
+  for w = 1, 2 do
+    if smp[w].name then
+      sc.smp[w] = { name = smp[w].name, semi = smp[w].semi or 0 }
+    end
+  end
   return sc
 end
 
@@ -3291,6 +3586,13 @@ local function scene_apply(sc)
     if sc.t[i] then manual[i].step, manual[i].on = sc.t[i].step, sc.t[i].on end
   end
   scene_apply_wave(sc)
+  -- A snapshot from before samples existed has no `smp` at all, and gets the
+  -- empty table snap_defaults already left behind rather than the last
+  -- patch's sample name hanging over someone else's audio.
+  for w = 1, 2 do
+    local u = sc.smp and sc.smp[w]
+    smp[w] = u and { name = u.name, secs = nil, semi = u.semi or 0 } or {}
+  end
   send_voices()
   send_voices(2)
   send_bank(true)
@@ -3428,6 +3730,8 @@ end
 -- the buffer and a bufclear would wipe what was just loaded.
 local function snap_defaults()
   for _, id in ipairs(SIDS) do param_reset(id) end
+  -- a clean sheet is not holding anybody's sample
+  smp[1], smp[2] = {}, {}
   for i = 1, NVOICE do
     for _, G in ipairs({ grains, grains2 }) do
       local v = G[i]
@@ -3740,7 +4044,14 @@ function init()
       if i <= 2 then env.pk[i + 1] = lv end
     end)
     if mp then
-      mp.time = 1 / 30
+      -- METERS 1 AND 2 ARE NOT ONLY METERS. They are the two granulator
+      -- levels the envelope follower can be pointed at, and a follower is a
+      -- good deal more sensitive to a stepped input than a bar is, so those
+      -- two keep thirty a second. The other five only ever draw a box on
+      -- SIGNAL, and a box redrawn faster than the screen refreshes is work
+      -- nobody sees - every poll is an OSC message out of sclang, which on a
+      -- Pi 3 is the process that starves the audio server when it is busy.
+      mp.time = (i <= 2) and (1 / 30) or (1 / 12)
       mp:start()
     end
   end
@@ -3751,13 +4062,17 @@ function init()
     in_amp = math.max(in_amp, v)
     env.pk[4] = math.max(env.pk[4], v)
   end)
-  pl.time = 1 / 60
+  -- Thirty, not sixty. These are accumulated as PEAKS between modulation
+  -- ticks rather than sampled, so halving the rate halves the OSC traffic
+  -- out of sclang without the follower ever seeing a gap - it sees a peak
+  -- taken over twice as long, which is what a peak is for.
+  pl.time = 1 / 30
   pl:start()
   local pr = poll.set("amp_in_r", function(v)
     in_amp = math.max(in_amp, v)
     env.pk[5] = math.max(env.pk[5], v)
   end)
-  pr.time = 1 / 60
+  pr.time = 1 / 30
   pr:start()
 
   local pc = poll.set("cpu_avg", function(v) cpu = v end)
@@ -3772,10 +4087,10 @@ function init()
     env.pk[1] = math.max(env.pk[1], v)
   end
   local ol = poll.set("amp_out_l", on_out)
-  ol.time = 1 / 60
+  ol.time = 1 / 30
   ol:start()
   local orr = poll.set("amp_out_r", on_out)
-  orr.time = 1 / 60
+  orr.time = 1 / 30
   orr:start()
 
   last_t = util.time()
@@ -3844,11 +4159,14 @@ function cleanup()
   if ui_metro then ui_metro:stop() end
   if mod_metro then mod_metro:stop() end
   for _, n in ipairs({ "amp_in_l", "amp_in_r", "cpu_avg",
-                       "amp_out_l", "amp_out_r",
-                       "meter1", "meter2", "meter3",
-                       "meter4", "meter5", "meter6" }) do
+                       "amp_out_l", "amp_out_r" }) do
     stop_poll(n)
   end
+  -- The meters by COUNT, not by a hand-written list. The list said meter1 to
+  -- meter6 and there have been seven since REVERB got a box on SIGNAL, so
+  -- meter7 was left running after the script exited - a poll firing out of
+  -- sclang forever, for a page that is no longer on screen.
+  for i = 1, 7 do stop_poll("meter" .. i) end
   audio.level_monitor(1)
 end
 
@@ -4397,8 +4715,8 @@ function draw_cells(pg)
       if linked then
         local ly = y + 2
         screen.level(dim and 2 or (on and 0 or 5))
-        screen.rect(lx, ly, 2, 3); screen.fill()
-        screen.rect(lx + 2, ly, 2, 3); screen.fill()
+        screen.rect(lx, ly, 2, 3); screen.rect(lx + 2, ly, 2, 3)
+        screen.fill()
         screen.level(dim and 2 or (on and 15 or 7))
         screen.rect(lx + 2, ly + 1, 1, 1); screen.fill()
         lx = lx + 5
@@ -4462,9 +4780,28 @@ function draw_cells(pg)
         -- ceil, not round: any amount at all lights the first block, so a
         -- parameter that is ON never looks like one that is OFF
         local lit = math.min(math.ceil(f * NSEG - 0.0001), NSEG)
-        for k = 1, NSEG do
-          screen.level((k <= lit) and lv or (dim and 1 or 2))
-          screen.rect(gx + ((k - 1) * pitch), gy, segw, gh)
+        -- ONE PATH PER LEVEL, not one per segment. cairo accumulates
+        -- rectangles into the current path and fills the lot on one call, so
+        -- a run of blocks at the same brightness is a single fill - which is
+        -- how the ladder gets drawn in four calls instead of twenty-four.
+        --
+        -- It matters more than it looks. Every page draws eight of these
+        -- every frame, twenty-five times a second, and every one of those
+        -- calls crosses from Lua into cairo on the same thread that reads the
+        -- encoders. That thread being busy is what a factory norns feels as
+        -- an encoder that does nothing and then jumps.
+        if lit > 0 then
+          screen.level(lv)
+          for k = 1, lit do
+            screen.rect(gx + ((k - 1) * pitch), gy, segw, gh)
+          end
+          screen.fill()
+        end
+        if lit < NSEG then
+          screen.level(dim and 1 or 2)
+          for k = lit + 1, NSEG do
+            screen.rect(gx + ((k - 1) * pitch), gy, segw, gh)
+          end
           screen.fill()
         end
       end
@@ -4518,11 +4855,21 @@ function draw_cells(pg)
         local lo, hi
         if n >= 0 then lo, hi = half + 1, half + math.ceil(n - 0.0001)
         else lo, hi = half + 1 + math.floor(n + 0.0001), half end
-        for k = 1, NSEG do
-          screen.level((k >= lo and k <= hi) and lv or (dim and 1 or 2))
-          screen.rect(gx + ((k - 1) * pitch), by, segw, bh)
+        -- lit run and unlit remainder as two paths, same as gauge above
+        if hi >= lo then
+          screen.level(lv)
+          for k = lo, hi do
+            screen.rect(gx + ((k - 1) * pitch), by, segw, bh)
+          end
           screen.fill()
         end
+        screen.level(dim and 1 or 2)
+        for k = 1, NSEG do
+          if k < lo or k > hi then
+            screen.rect(gx + ((k - 1) * pitch), by, segw, bh)
+          end
+        end
+        screen.fill()
         screen.level(dim and 3 or (on and 15 or 12))
         screen.rect(gx + (half * pitch) - 1, by - 1, 1, bh + 2)
         screen.fill()
@@ -4851,7 +5198,7 @@ function draw_waveform()
     local si = params:get(swid(w, "src"))
     screen.level((si == 1) and 15 or 6)
     screen.move(126, WAVE_TOP + 7)
-    screen.text_right(src_label(si))
+    screen.text_right(src_label(si, w))
   end
 
   -- LOCK and SOS used to print here too, in exactly the same pixels as the
@@ -5542,10 +5889,24 @@ function draw_lfo_lane(i, top, h)
     px = W
   else
     -- a function of phase: draw the curve itself, exact at any rate
+    --
+    -- EVERY OTHER PIXEL, except for SQUARE. A sine, a triangle and a ramp
+    -- sampled every two pixels and joined with straight segments are
+    -- indistinguishable at this size from the same curve sampled every one -
+    -- the segments interpolate what was skipped - and it is half the calls.
+    -- Two lanes at ninety-seven points each was the single biggest thing
+    -- MODNI asked the screen for. SQUARE is the exception because its edge is
+    -- vertical: sampled coarsely it comes back as a two-pixel diagonal, which
+    -- reads as a drawing fault rather than as a gate.
     local off = params:get(LFO_ID[i].phase)
-    for x = 0, W do
+    local step = (shape == 6) and 1 or 2
+    for x = 0, W, step do
       local y = cy - (lfo_at(i, (x / W) + off) * half)
       if x == 0 then screen.move(x, y) else screen.line(x, y) end
+    end
+    -- the last sample may have fallen short of the right edge
+    if (W % step) ~= 0 then
+      screen.line(W, cy - (lfo_at(i, 1 + off) * half))
     end
     px = ((l.phase + params:get(LFO_ID[i].phase)) % 1) * W
   end
@@ -5925,6 +6286,11 @@ end
 local SNAP_TH = {}
 for i = 0, 63 do SNAP_TH[i] = ((i * 37) % 61) / 60 end
 
+-- The slots that are not idle this frame, held between frames so the page is
+-- not allocating a table twenty-five times a second for something that is
+-- usually empty.
+local rit_busy = {}
+
 function draw_ritratt()
   local st = snap_state()
   -- Five pixels tall, not six. Eight rows of six ran from y=11 to y=59 and
@@ -5941,7 +6307,45 @@ function draw_ritratt()
   screen.move(2, 62)
   screen.text("K2 LOAD   K3 SAVE   BOTH CLEAR")
 
-  for i = 1, 120 do
+  -- TWO PATHS FOR A HUNDRED AND TWENTY SQUARES.
+  --
+  -- Every slot used to get its own level/rect/stroke, so this page cost 360
+  -- cairo calls a frame before it drew anything else - by a wide margin the
+  -- most expensive thing the script asks the screen to do, on the same thread
+  -- that reads the encoders. But almost every slot is IDLE, and an idle slot
+  -- is drawn at exactly one of two brightnesses: empty, or holding a
+  -- snapshot. Two brightnesses is two paths, whatever the number of squares.
+  --
+  -- Only the slots that are actually DOING something - filling, dissolving,
+  -- pulsing, or under the cursor - still need a call of their own, and there
+  -- are never more than a handful of those at once.
+  local busy_n = 0
+  for pass = 0, 1 do
+    screen.level((pass == 1) and 4 or 2)
+    local any = false
+    for i = 1, 120 do
+      local f = st.fill[i] or 0
+      local pu = st.pulse[i] or 0
+      local occ = snap_occupied(i)
+      if f > 0.02 or pu > 0 or i == st.sel then
+        -- not idle. Recorded once, on the first pass, and drawn below.
+        if pass == 0 then
+          busy_n = busy_n + 1
+          rit_busy[busy_n] = i
+        end
+      elseif (occ and 1 or 0) == pass then
+        local col = ((i - 1) % 15)
+        local row = math.floor((i - 1) / 15)
+        screen.rect(x0 + (col * cw) + 0.5, y0 + (row * ch) + 0.5,
+          cw - 3, ch - 3)
+        any = true
+      end
+    end
+    if any then screen.stroke() end
+  end
+
+  for b = 1, busy_n do
+    local i = rit_busy[b]
     local col = ((i - 1) % 15)
     local row = math.floor((i - 1) / 15)
     local x, y = x0 + (col * cw), y0 + (row * ch)
@@ -6258,7 +6662,7 @@ function redraw()
     -- cell zero on a GRAINSWARM page is the waveform, and its value is the
     -- source. Everywhere else a page with no cell simply has no value.
     local vw = grain_vis_page(pg)
-    value = vw and src_label(params:get(swid(vw, "src"))) or ""
+    value = vw and src_label(params:get(swid(vw, "src")), vw) or ""
   elseif c.id == "m_scan" then
     value = scan_label()
   elseif c.id == "s_rate" then
@@ -6653,9 +7057,37 @@ function g.key(x, y, z)
   end
 end
 
+-- The LED frame is built into a shadow buffer and only pushed to the device
+-- when it DIFFERS from what is already on there.
+--
+-- The old version cleared the grid, wrote up to a hundred and twenty-eight
+-- LEDs and sent a serial frame every single display tick, twenty-five times a
+-- second, whether anything had moved or not - and on most pages nothing does
+-- for seconds at a time. Every one of those writes is a Lua-to-C call on the
+-- thread that also reads the encoders, and the refresh is a serial write on
+-- top. Comparing 128 integers first is cheaper than any of it by a wide
+-- margin.
+local gbuf, gprev = {}, {}
+for i = 1, 128 do gbuf[i], gprev[i] = 0, -1 end
+local grid_last = 0
+-- (x, y, l) not (self, ...): `g:led(a,b,c)` became `gled(a,b,c)`, a plain
+-- call, when the colon went
+local function gled(x, y, l)
+  if x >= 1 and x <= 16 and y >= 1 and y <= 8 then
+    gbuf[((y - 1) * 16) + x] = l
+  end
+end
+
 function grid_redraw()
-  if g.device == nil then return end
-  g:all(0)
+  if g.device == nil then
+    -- Unplugged. Forget what was on it, so the frame after it comes back is
+    -- unconditionally sent: a grid that reconnects is a BLANK grid, and
+    -- comparing against what the old one was showing would leave it blank
+    -- until something happened to move.
+    gprev[1] = -1
+    return
+  end
+  for i = 1, 128 do gbuf[i] = 0 end
   local nn = cols()
   local kind = PAGES[page].kind
 
@@ -6671,16 +7103,16 @@ function grid_redraw()
           lv = st.on and 15 or 6
           if st.on and fl > 0 then lv = 15 end
         end
-        g:led(x, row, lv)
+        gled(x, row, lv)
       end
       if nn >= 16 then
         for i = 1, #OCTAVES do
-          g:led(12 + i, row, (st.oct == i) and (st.on and 12 or 5) or 2)
+          gled(12 + i, row, (st.oct == i) and (st.on and 12 or 5) or 2)
         end
       end
       -- a brief lift across the row when that grain fires
       if fl > 0.5 and st.on then
-        g:led(util.clamp(st.semi + 1, 1, semis), row, 15)
+        gled(util.clamp(st.semi + 1, 1, semis), row, 15)
       end
     end
   elseif kind == "delay" then
@@ -6690,13 +7122,13 @@ function grid_redraw()
       local t = taps[i]
       for x = 1, n do
         -- every fourth step marked, so the bar is readable
-        g:led(x, i, ((x - 1) % 4 == 0) and 2 or 1)
+        gled(x, i, ((x - 1) % 4 == 0) and 2 or 1)
       end
       if t.on then
         local x = util.clamp(t.step + 1, 1, n)
         local lv = gen and 9 or 14
         if tap_flash[i] > 0 then lv = 15 end
-        g:led(x, i, lv)
+        gled(x, i, lv)
       end
     end
   elseif kind == "ritratt" or kind == "pappus" then
@@ -6709,13 +7141,13 @@ function grid_redraw()
         local lv = snap_occupied(i) and 8 or 1
         if i == st.last then lv = 15 end
         if i == st.sel then lv = math.max(lv, 4) end
-        g:led(x, y, lv)
+        gled(x, y, lv)
       end
       if nn >= 16 then
         -- top half is SAVE, bottom half is CLEAR, so the split reads at a
         -- glance even before anything is held
         local armed = (y <= 4) and save_held or clear_held
-        g:led(16, y, armed and 15 or ((y <= 4) and 4 or 2))
+        gled(16, y, armed and 15 or ((y <= 4) and 4 or 2))
       end
     end
   elseif kind == "spettru" then
@@ -6725,11 +7157,11 @@ function grid_redraw()
       for x = 1, semis do
         local lv = BLACK[x - 1] and 1 or 3
         if st.semi == (x - 1) then lv = st.on and 15 or 6 end
-        g:led(x, row, lv)
+        gled(x, row, lv)
       end
       if nn >= 16 then
         for i = 1, #OCTAVES do
-          g:led(12 + i, row, (st.oct == i) and (st.on and 12 or 5) or 2)
+          gled(12 + i, row, (st.oct == i) and (st.on and 12 or 5) or 2)
         end
       end
     end
@@ -6747,16 +7179,41 @@ function grid_redraw()
       if cell.bipolar then
         local zc = util.clamp(
           util.round(zero_frac(cell.id) * (nn - 1)) + 1, 1, nn)
-        for x = math.min(zc, col), math.max(zc, col) do g:led(x, i, lv) end
-        g:led(util.clamp(zc, 1, nn), i, 4)
+        for x = math.min(zc, col), math.max(zc, col) do gled(x, i, lv) end
+        gled(util.clamp(zc, 1, nn), i, 4)
       elseif v > 0.0001 then
-        for x = 1, col do g:led(x, i, lv) end
+        for x = 1, col do gled(x, i, lv) end
       end
       if (not cell.bipolar) and v <= 0.0001 then
-        g:led(1, i, (i == sel[page]) and 4 or 2)
+        gled(1, i, (i == sel[page]) and 4 or 2)
       end
       end
     end
   end
+
+  local dirty = false
+  for i = 1, 128 do
+    if gbuf[i] ~= gprev[i] then dirty = true; break end
+  end
+  if not dirty then return end
+  -- ...and even a changed frame is only sent as often as GRID FPS allows.
+  -- What is missed is picked up on the next tick, because the comparison
+  -- above is against what was last SENT, not against the last frame built.
+  -- A millisecond of slack in the comparison. Without it the interval and the
+  -- tick are the same number, floating point decides which is fractionally
+  -- larger, and at the default the throttle halves the rate it was meant to
+  -- leave alone.
+  local now = util.time()
+  if (now - grid_last) < ((1 / GRID_FPS) - 0.001) then return end
+  grid_last = now
+
+  g:all(0)
+  for y = 1, 8 do
+    for x = 1, nn do
+      local v = gbuf[((y - 1) * 16) + x]
+      if v ~= 0 then g:led(x, y, v) end
+    end
+  end
   g:refresh()
+  for i = 1, 128 do gprev[i] = gbuf[i] end
 end
