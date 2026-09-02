@@ -16,7 +16,7 @@ E1                       select parameter
 E2 value                 E3 sub-value / fine tune
 ```
 
-Grid compatible (see below).
+Grid compatible.
 
 Designed by Michael Manning. Inspired by Torso S-4.
 
@@ -100,6 +100,7 @@ if it were a waveform. So **SRC** is:
 STEREO     left to the left buffer, right to the right, kept apart
 MONO L     the left input, written to BOTH buffers
 ```
+
 ```
 STEREO     left to the left buffer, right to the right, kept apart
 MONO L     the left input, written to BOTH buffers
@@ -216,3 +217,4 @@ things worth knowing:
 - **LOSS** is the single most expensive control in the engine — it is a real
   short-time Fourier transform — but it costs the same whether the knob is up
   or down.
+
