@@ -72,27 +72,8 @@ function Params:add_number(id, name, min, max, default)
   table.insert(self.order, id)
 end
 
--- A FILE param is a string param wearing a browser. norns stores the path and
--- fires the action with it, and the default is the folder it opens in, which
--- is why the script's action has to treat a bare folder as "nothing chosen".
-function Params:add_file(id, name, default)
-  assert(not self.byid[id], "duplicate param id: " .. id)
-  self.byid[id] = { id = id, name = name, value = default or "",
-                    file = true, action = function() end }
-  table.insert(self.order, id)
-end
-
--- A TRIGGER has no value at all: params:set fires it and stores nothing.
-function Params:add_trigger(id, name)
-  assert(not self.byid[id], "duplicate param id: " .. id)
-  self.byid[id] = { id = id, name = name, value = 0, trigger = true,
-                    action = function() end }
-  table.insert(self.order, id)
-end
-
 local function is_number_param(p)
   return p.options == nil and p.controlspec == nil
-    and not p.file and not p.trigger
 end
 
 function Params:lookup_param(id)
@@ -107,14 +88,7 @@ function Params:get(id) return self:lookup_param(id).value end
 
 function Params:set(id, v, silent)
   local p = self:lookup_param(id)
-  if p.trigger then
-    if not silent then p.action(v or 0) end
-    return
-  elseif p.file then
-    p.value = tostring(v)
-    if not silent then p.action(p.value) end
-    return
-  elseif p.options then
+  if p.options then
     v = math.max(1, math.min(#p.options, math.floor(v + 0.5)))
   elseif p.controlspec then
     v = math.max(p.controlspec.minval, math.min(p.controlspec.maxval, v))
@@ -151,9 +125,7 @@ end
 
 function Params:delta(id, d)
   local p = self:lookup_param(id)
-  if p.file or p.trigger then
-    return
-  elseif p.options then
+  if p.options then
     self:set(id, math.max(1, math.min(#p.options, p.value + d)))
   elseif is_number_param(p) then
     self:set(id, p.value + d)
@@ -164,7 +136,6 @@ end
 
 function Params:string(id)
   local p = self:lookup_param(id)
-  if p.file or p.trigger then return tostring(p.value) end
   if p.options then return p.options[p.value] end
   if is_number_param(p) then return tostring(p.value) end
   return string.format("%.2f%s", p.value, p.controlspec.units or "")
@@ -173,8 +144,7 @@ end
 function Params:bang()
   for _, id in ipairs(self.order) do
     local p = self.byid[id]
-    -- norns does not bang a trigger: it has no value to restore
-    if not p.trigger then p.action(p.value) end
+    p.action(p.value)
   end
 end
 
@@ -236,8 +206,7 @@ function M.install(engine_sc_path)
   M.now = 1000.0
   -- scan_noise_loops() builds a path off this before it ever gets to
   -- scandir, so it has to exist even though scandir ignores it
-  -- ...and _path.audio, which the sample file params open the browser in
-  _G._path = { code = "/tmp/mock-pappus-code/", audio = "/tmp/mock-pappus-audio/" }
+  _G._path = { code = "/tmp/mock-pappus-code/" }
 
   -- Screen ops are recorded verbatim so a rasteriser can draw exactly what
   -- norns would draw, rather than a re-implementation of the same maths.

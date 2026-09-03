@@ -268,100 +268,6 @@ function swid(w, name)
   return SWP[w or 1] .. name
 end
 
--- ---------------------------------------------------------------------------
--- SAMPLES
---
--- A granulator's buffer can be FILLED FROM A FILE instead of from the input.
--- Nothing downstream changes: GRAINSWARM does not know or care where the
--- samples in its buffer came from, so this is a second way of getting audio
--- in there rather than a second mode of running. A snapshot taken afterwards
--- saves the loaded audio exactly as it saves a recording, because it is
--- writing the same buffer out either way.
---
--- Three things have to move with the load, and none of them is optional:
---
---   SOURCE goes to OFF, or the live input starts writing over the sample the
---          moment it lands. OFF is not "silence recorded over the top" - the
---          write is gated shut and the buffer holds - which is exactly what
---          a loaded sample needs.
---   SOS    goes to 1, because SOS is also the blend: at 0 you hear the input
---          going past rather than the grains, and with SOURCE off that input
---          is silence. Loading a file and hearing nothing is not a state
---          worth shipping.
---   BUFFR  goes to the sample's own length, so the playhead and the window
---          span the file rather than the file plus fifty seconds of silence.
---
--- All three are ordinary knobs on the page afterwards. Turning SOURCE back to
--- STEREO resumes recording over the sample, which is the way back.
-local smp = { {}, {} }            -- per granulator: name, secs, semi
-
--- norns runs its server at 48 kHz and Buffer.read does not resample: a 44.1 k
--- file lands in the buffer frame for frame and therefore plays 8.8 per cent
--- fast, which is a semitone and a half sharp. Correcting it is one number -
--- the offset is added to every voice's pitch on the way to the engine, so the
--- grains come out at the pitch the file was recorded at while RESONATOR,
--- which is tuned from the chord rather than from this, stays where it was.
-local SERVER_SR = 48000
-
--- Channel count, frame count and sample rate of a wav, without loading it.
--- norns' own audio.file_info is used when it is there; the RIFF walk is the
--- fallback, and is what the test suite runs against.
-function wav_info(path)
-  if audio and audio.file_info then
-    local ch, frames, rate = audio.file_info(path)
-    -- file_info returns -1 for a file it could not read
-    if ch and ch > 0 and frames and frames > 0 then
-      return ch, frames, (rate and rate > 0) and rate or SERVER_SR
-    end
-    return nil
-  end
-  local f = io.open(path, "rb")
-  if not f then return nil end
-  local function u(str, at, n)          -- little-endian unsigned
-    local v = 0
-    for i = n, 1, -1 do v = (v * 256) + str:byte(at + i - 1) end
-    return v
-  end
-  local hdr = f:read(12)
-  if not hdr or #hdr < 12 or hdr:sub(1, 4) ~= "RIFF"
-    or hdr:sub(9, 12) ~= "WAVE" then
-    f:close()
-    return nil
-  end
-  local ch, rate, bits, bytes
-  while true do
-    local c = f:read(8)
-    if not c or #c < 8 then break end
-    local id, sz = c:sub(1, 4), u(c, 5, 4)
-    if id == "fmt " then
-      local d = f:read(sz)
-      if not d or #d < 16 then break end
-      ch, rate, bits = u(d, 3, 2), u(d, 5, 4), u(d, 15, 2)
-    elseif id == "data" then
-      bytes = sz
-      break
-    else
-      -- chunks are word aligned: an odd size carries a pad byte
-      f:seek("cur", sz + (sz % 2))
-    end
-  end
-  f:close()
-  if not (ch and rate and bits and bytes) or ch < 1 or bits < 8 then
-    return nil
-  end
-  return ch, math.floor(bytes / (ch * (bits / 8))), rate
-end
-
--- The pitch offset a loaded sample needs, in semitones, or 0 for a live
--- buffer. Read by send_voices on its way to the engine.
-function sample_semi(w)
-  return smp[w or 1].semi or 0
-end
-
-function sample_name(w)
-  return smp[w or 1].name
-end
-
 -- MIDI note input. Notes drive the same eight voices the grid does, by
 -- writing straight into `grains` rather than shadowing it: the visualiser,
 -- the RESONATOR pitch lock and the grid display all read that table already,
@@ -1069,10 +975,7 @@ local function send_voices(w)
   for i = 1, NVOICE do
     local st = G[i]
     local semi = base + st.semi + (OCTAVES[st.oct] * 12)
-    -- the sample rate correction is added AFTER the scale snap, not before:
-    -- it is a playback-speed compensation, not a note, and snapping it would
-    -- quantise the fix away and leave the file sharp again
-    p[i] = snap_to_scale(semi, sc) + sample_semi(w)
+    p[i] = snap_to_scale(semi, sc)
     gt[i] = st.on and st.lvl or 0
     pr[i] = st.prob
   end
@@ -1092,100 +995,6 @@ local function send_voices(w)
   -- Only when SLICE is continuous: on a slow slice the whole point is that
   -- the bank keeps the chord it caught until the next tick.
   if send_bank and params:get("p_freeze") ~= 2 then send_bank() end
-end
-
--- LOAD. Reads the header here so BUFFR and the rate correction are known
--- before the engine is asked for anything, and so an unreadable file is
--- reported rather than silently dropped into the buffer.
---
--- The engine does the actual read: it is the side that owns the buffers, and
--- Buffer.readChannel is what keeps a stereo file's two sides apart instead of
--- landing the interleave in a mono buffer.
-function sample_load(w, path)
-  w = w or 1
-  if not path or path == "" or path == "-" then return false end
-  local ch, frames, rate = wav_info(path)
-  if not ch then
-    print("pappus: could not read " .. tostring(path))
-    sample_release(w)
-    return false
-  end
-  -- WHERE SOS WAS BEFORE THE LOAD, so it can be handed back.
-  --
-  -- Loading a second sample on top of a first must not overwrite this with
-  -- the 1.0 the first load left behind: the number to keep is the one from
-  -- before any of this started.
-  local held_sos = smp[w].name and smp[w].sos or params:get(swid(w, "sos"))
-  -- The file occupies `frames` BUFFER frames whatever its own rate, because
-  -- nothing resamples on the way in - so BUFFR, which is measured in buffer
-  -- frames at the server's rate, is frames/48000 and not the file's duration.
-  local secs = util.clamp(frames / SERVER_SR, BUFLEN_MIN, BUFLEN_MAX)
-  smp[w] = {
-    name = path:match("([^/]+)$") or path,
-    secs = secs,
-    semi = (rate ~= SERVER_SR)
-      and (12 * math.log(rate / SERVER_SR, 2)) or 0,
-    sos = held_sos,
-  }
-  engine.bufload(w, path)
-  -- and the settings the load cannot leave alone - see the SAMPLES note
-  -- above for why each one has to move
-  params:set(swid(w, "src"), 1)          -- OFF: nothing writes over it
-  -- LOCK, not just SOS at the top.
-  --
-  -- Both freeze the buffer - the engine takes max(SOS, LOCK) - and the
-  -- sample needs freezing, because below about 0.95 the write path feeds the
-  -- old content back at less than unity and the sample decays away over a
-  -- few passes even with nothing recording into it.
-  --
-  -- But SOS at the top is an INVISIBLE freeze: it is a bar on one cell, and
-  -- the granulator having stopped recording is not something you would read
-  -- off it. LOCK is the instrument's own freeze and it says so in the header
-  -- in place of the page name. Leaving the buffer held by a state you cannot
-  -- see is how "I turned SRC back on and nothing records" happens - which it
-  -- did, because SOS was still pinned at the top from a load.
-  --
-  -- SOS still goes up, because it is also the BLEND and at the bottom you
-  -- hear the input going past rather than the grains. It is just no longer
-  -- the thing doing the holding, and it is given back below.
-  params:set(swid(w, "sos"), 1)          -- grains only, not silence
-  params:set(swid(w, "lock"), 2)         -- ...and the freeze, where it shows
-  params:set(swid(w, "buflen"), secs)
-  send_voices(w)                         -- the rate correction, to the engine
-  if frames > (BUFDUR * SERVER_SR) then
-    print(string.format("pappus: %s is longer than the %ds buffer, truncated",
-      smp[w].name, math.floor(BUFDUR)))
-  end
-  return true
-end
-
--- STOP BEING A SAMPLE, without touching the audio.
---
--- Everything the load moved to hold the file still goes back: LOCK off, SOS
--- to whatever it was before. That is what makes SRC -> STEREO a real way
--- back rather than a setting that appears to arm an input the granulator is
--- still frozen against.
---
--- BUFFR is deliberately NOT restored. It is the one of the four that is
--- musically meaningful on its own - it is the loop length you are now
--- working with - and snapping it back to eight seconds under someone who has
--- been playing a two second sample would be the surprise, not the courtesy.
-function sample_release(w)
-  w = w or 1
-  local prev = smp[w].sos
-  smp[w] = {}
-  params:set(swid(w, "lock"), 1)
-  if prev then params:set(swid(w, "sos"), prev) end
-  send_voices(w)
-end
-
--- ...and forget it again, audio included. The buffer is wiped rather than
--- left holding the sample, because "no sample" that still granulates the last
--- one is a lie the waveform display would go on telling.
-function sample_clear(w)
-  w = w or 1
-  if engine.bufwipe then engine.bufwipe(w) end
-  sample_release(w)
 end
 
 -- Bresenham/Bjorklund euclidean distribution: k onsets spread over n steps.
@@ -1696,15 +1505,14 @@ end
 -- so on a held chord the knob did nothing at all. A control that is inert
 -- unless something else is happening is not a control.
 -- The bank's inputs, as a set. Everything the layout reads that a MODULATOR
--- can reach: the four RESONATOR knobs, the scale, and the two chord
--- transposes. The chord itself is not here - a chord change comes through
--- send_voices, which re-lays the bank on the spot.
+-- can reach: the four RESONATOR knobs, the scale, the two chord transposes,
+-- and the two feeds - which of those is larger decides WHICH granulator's
+-- chord the bank follows. The chord itself is not here; a chord change comes
+-- through send_voices, which re-lays the bank on the spot.
 local BANK_DEPS = {
   p_freq = true, p_freqmode = true, p_structure = true,
   p_bright = true, p_pos = true,
   m_scale = true, m_pitch = true, n_pitch = true,
-  -- ...and the two DRY IN feeds, because which of them is larger is what
-  -- decides WHICH granulator's chord the bank follows
   p_in1 = true, p_in2 = true,
 }
 
@@ -1718,11 +1526,10 @@ local BANK_DEPS = {
 -- modulated value, so a modulated FREQUENCY or BRIGHTNESS re-tunes the bank
 -- whether this tick runs or not.
 --
--- What this is still here for is the case the actions cannot cover on their
--- own: a destination whose value is moving but whose quantised send has not
--- changed, and anything else that reaches the layout sideways. So it runs
--- when something is modulating one of the bank's inputs, and does not when
--- nothing is - which is the state a patch is in almost all of the time.
+-- What this is still here for is the case those actions cannot cover: a
+-- destination whose value is moving but whose quantised send has not changed.
+-- So it runs when something is modulating one of the bank's inputs, and does
+-- not when nothing is - which is almost all of the time.
 function spettru_tick(dt)
   if params:get("p_freeze") == 2 then return end
   for id in pairs(BANK_DEPS) do
@@ -1958,13 +1765,7 @@ end
 -- Not the raw option names. "OFF" on a waveform that is not moving says
 -- nothing about WHY; "NO INPUT" says what is wrong and "STEREO IN" says what
 -- is happening, which is the same information a mixer prints on a channel.
--- ...and OFF reads as the SAMPLE's name when a file has been loaded into
--- that granulator, because "NO INPUT" over a buffer full of a sample you
--- just chose is the one thing on this page that would be actively wrong.
-function src_label(i, w)
-  if i == 1 and w and sample_name(w) then
-    return (sample_name(w):gsub("%.[Ww][Aa][Vv]$", ""):upper())
-  end
+function src_label(i)
   return ({ "NO INPUT", "STEREO IN", "MONO L", "MONO R" })[i] or "NO INPUT"
 end
 
@@ -2487,31 +2288,7 @@ local function add_params()
   -- than stacked against one speaker.
   params:add_option("m_src", "1 source",
     { "OFF", "STEREO", "MONO L", "MONO R" }, 1)
-  params:set_action("m_src", function(x)
-    engine.msrc(x)
-    -- Choosing a live input is how you say "stop being a sample". The buffer
-    -- is NOT wiped - the input is about to record over it anyway, and wiping
-    -- would drop a beat of silence in first - but the name and the rate
-    -- correction go, because from here on what is in there is a recording.
-    if x > 1 and smp[1].name then sample_release(1) end
-  end)
-
-  -- LOAD A SAMPLE into this granulator's buffer instead of recording one.
-  -- A file param rather than a cell: picking a file needs the browser, and
-  -- there is no room on the page for one. See the SAMPLES note near the top
-  -- for what the load moves and why.
-  params:add_file("m_sample", "1 sample", _path.audio)
-  params:set_action("m_sample", function(f)
-    -- A file param's DEFAULT is the folder it opens in, and params:bang()
-    -- fires every action at startup with whatever it is holding - so "no
-    -- file chosen" arrives here as a directory, not as an empty string, and
-    -- has to be turned away without reporting a failure nobody caused.
-    if f == nil or f == "" or f == "-" or f:sub(-1) == "/" then return end
-    sample_load(1, f)
-  end)
-
-  params:add_trigger("m_sample_clear", "1 clear sample")
-  params:set_action("m_sample_clear", function() sample_clear(1) end)
+  params:set_action("m_src", function(x) engine.msrc(x) end)
 
   -- sound on sound. 0 records normally, the middle layers new over old with
   -- the old decaying each pass, and the very top is a true freeze.
@@ -2673,31 +2450,7 @@ local function add_params()
   -- the option survived as a setting that silently recorded nothing.
   params:add_option("n_src", "2 source",
     { "OFF", "STEREO", "MONO L", "MONO R" }, 1)
-  params:set_action("n_src", function(x)
-    engine.nsrc(x)
-    -- Choosing a live input is how you say "stop being a sample". The buffer
-    -- is NOT wiped - the input is about to record over it anyway, and wiping
-    -- would drop a beat of silence in first - but the name and the rate
-    -- correction go, because from here on what is in there is a recording.
-    if x > 1 and smp[2].name then sample_release(2) end
-  end)
-
-  -- LOAD A SAMPLE into this granulator's buffer instead of recording one.
-  -- A file param rather than a cell: picking a file needs the browser, and
-  -- there is no room on the page for one. See the SAMPLES note near the top
-  -- for what the load moves and why.
-  params:add_file("n_sample", "2 sample", _path.audio)
-  params:set_action("n_sample", function(f)
-    -- A file param's DEFAULT is the folder it opens in, and params:bang()
-    -- fires every action at startup with whatever it is holding - so "no
-    -- file chosen" arrives here as a directory, not as an empty string, and
-    -- has to be turned away without reporting a failure nobody caused.
-    if f == nil or f == "" or f == "-" or f:sub(-1) == "/" then return end
-    sample_load(2, f)
-  end)
-
-  params:add_trigger("n_sample_clear", "2 clear sample")
-  params:set_action("n_sample_clear", function() sample_clear(2) end)
+  params:set_action("n_src", function(x) engine.nsrc(x) end)
 
   params:add_control("n_sos", "2 sos",
     controlspec.new(0, 1, "lin", 0, 0, ""))
@@ -3199,8 +2952,7 @@ local function add_params()
   --
   -- Nothing about the instrument changes with this - the animation is all
   -- time-based and advances by dt - it is the number of times a second the
-  -- picture is rebuilt. Fifteen is still smooth for what is on these pages
-  -- and is a forty per cent cut in everything the screen costs.
+  -- picture is rebuilt.
   params:add_option("fps", "screen fps", { "25", "20", "15", "10" }, 1)
   params:set_action("fps", function(x)
     FPS = ({ 25, 20, 15, 10 })[x] or 25
@@ -3210,11 +2962,10 @@ local function add_params()
     end
   end)
 
-  -- GRID FPS, separately, because the grid is a different bottleneck: it is
-  -- not cairo, it is up to a hundred and twenty-eight LED writes and a serial
-  -- frame per refresh. The display already skips a refresh when nothing on
-  -- the grid moved; this caps how often it may send one when things ARE
-  -- moving.
+  -- GRID FPS, separately, because the grid is a different bottleneck: not
+  -- cairo, but up to a hundred and twenty-eight LED writes and a serial frame
+  -- per refresh. The display already skips a refresh when nothing on the grid
+  -- moved; this caps how often it may send one when things ARE moving.
   params:add_option("grid_fps", "grid fps", { "25", "15", "10" }, 1)
   params:set_action("grid_fps", function(x)
     GRID_FPS = ({ 25, 15, 10 })[x] or 25
@@ -3555,21 +3306,6 @@ local function scene_capture()
   for i = 1, NTAP do
     sc.t[i] = { step = manual[i].step, on = manual[i].on }
   end
-  -- WHICH SAMPLE, if either buffer is holding one.
-  --
-  -- Not so the file can be reloaded - the snapshot writes the buffer itself
-  -- out, so the audio is already coming back - but so the two things the load
-  -- set that the audio does not carry come back with it: the name shown in
-  -- place of the source, and the sample-rate correction. Restore the frames
-  -- without the correction and a 44.1k sample comes back a semitone and a
-  -- half sharp from the slot you saved it flat in.
-  sc.smp = {}
-  for w = 1, 2 do
-    if smp[w].name then
-      sc.smp[w] = { name = smp[w].name, semi = smp[w].semi or 0,
-                    sos = smp[w].sos }
-    end
-  end
   return sc
 end
 
@@ -3624,14 +3360,6 @@ local function scene_apply(sc)
     if sc.t[i] then manual[i].step, manual[i].on = sc.t[i].step, sc.t[i].on end
   end
   scene_apply_wave(sc)
-  -- A snapshot from before samples existed has no `smp` at all, and gets the
-  -- empty table snap_defaults already left behind rather than the last
-  -- patch's sample name hanging over someone else's audio.
-  for w = 1, 2 do
-    local u = sc.smp and sc.smp[w]
-    smp[w] = u and { name = u.name, secs = nil, semi = u.semi or 0,
-                     sos = u.sos } or {}
-  end
   send_voices()
   send_voices(2)
   send_bank(true)
@@ -3769,8 +3497,6 @@ end
 -- the buffer and a bufclear would wipe what was just loaded.
 local function snap_defaults()
   for _, id in ipairs(SIDS) do param_reset(id) end
-  -- a clean sheet is not holding anybody's sample
-  smp[1], smp[2] = {}, {}
   for i = 1, NVOICE do
     for _, G in ipairs({ grains, grains2 }) do
       local v = G[i]
@@ -4102,9 +3828,9 @@ function init()
     env.pk[4] = math.max(env.pk[4], v)
   end)
   -- Thirty, not sixty. These are accumulated as PEAKS between modulation
-  -- ticks rather than sampled, so halving the rate halves the OSC traffic
-  -- out of sclang without the follower ever seeing a gap - it sees a peak
-  -- taken over twice as long, which is what a peak is for.
+  -- ticks rather than sampled, so halving the rate halves the OSC traffic out
+  -- of sclang without the follower ever seeing a gap - it sees a peak taken
+  -- over twice as long, which is what a peak is for.
   pl.time = 1 / 30
   pl:start()
   local pr = poll.set("amp_in_r", function(v)
@@ -4204,7 +3930,7 @@ function cleanup()
   -- The meters by COUNT, not by a hand-written list. The list said meter1 to
   -- meter6 and there have been seven since REVERB got a box on SIGNAL, so
   -- meter7 was left running after the script exited - a poll firing out of
-  -- sclang forever, for a page that is no longer on screen.
+  -- sclang forever, for a page no longer on screen.
   for i = 1, 7 do stop_poll("meter" .. i) end
   audio.level_monitor(1)
 end
@@ -4821,11 +4547,10 @@ function draw_cells(pg)
         local lit = math.min(math.ceil(f * NSEG - 0.0001), NSEG)
         -- ONE PATH PER LEVEL, not one per segment. cairo accumulates
         -- rectangles into the current path and fills the lot on one call, so
-        -- a run of blocks at the same brightness is a single fill - which is
-        -- how the ladder gets drawn in four calls instead of twenty-four.
+        -- a run of blocks at the same brightness is a single fill - the
+        -- ladder gets drawn in four calls instead of twenty-four.
         --
-        -- It matters more than it looks. Every page draws eight of these
-        -- every frame, twenty-five times a second, and every one of those
+        -- Every page draws eight of these every frame, and every one of those
         -- calls crosses from Lua into cairo on the same thread that reads the
         -- encoders. That thread being busy is what a factory norns feels as
         -- an encoder that does nothing and then jumps.
@@ -5237,7 +4962,7 @@ function draw_waveform()
     local si = params:get(swid(w, "src"))
     screen.level((si == 1) and 15 or 6)
     screen.move(126, WAVE_TOP + 7)
-    screen.text_right(src_label(si, w))
+    screen.text_right(src_label(si))
   end
 
   -- LOCK and SOS used to print here too, in exactly the same pixels as the
@@ -6355,9 +6080,9 @@ function draw_ritratt()
   -- is drawn at exactly one of two brightnesses: empty, or holding a
   -- snapshot. Two brightnesses is two paths, whatever the number of squares.
   --
-  -- Only the slots that are actually DOING something - filling, dissolving,
-  -- pulsing, or under the cursor - still need a call of their own, and there
-  -- are never more than a handful of those at once.
+  -- Only the slots actually DOING something - filling, dissolving, pulsing,
+  -- or under the cursor - still need a call of their own, and there are never
+  -- more than a handful of those at once.
   local busy_n = 0
   for pass = 0, 1 do
     screen.level((pass == 1) and 4 or 2)
@@ -6367,7 +6092,6 @@ function draw_ritratt()
       local pu = st.pulse[i] or 0
       local occ = snap_occupied(i)
       if f > 0.02 or pu > 0 or i == st.sel then
-        -- not idle. Recorded once, on the first pass, and drawn below.
         if pass == 0 then
           busy_n = busy_n + 1
           rit_busy[busy_n] = i
@@ -6701,7 +6425,7 @@ function redraw()
     -- cell zero on a GRAINSWARM page is the waveform, and its value is the
     -- source. Everywhere else a page with no cell simply has no value.
     local vw = grain_vis_page(pg)
-    value = vw and src_label(params:get(swid(vw, "src")), vw) or ""
+    value = vw and src_label(params:get(swid(vw, "src"))) or ""
   elseif c.id == "m_scan" then
     value = scan_label()
   elseif c.id == "s_rate" then
@@ -7100,12 +6824,11 @@ end
 -- when it DIFFERS from what is already on there.
 --
 -- The old version cleared the grid, wrote up to a hundred and twenty-eight
--- LEDs and sent a serial frame every single display tick, twenty-five times a
+-- LEDs and sent a serial frame every display tick, twenty-five times a
 -- second, whether anything had moved or not - and on most pages nothing does
 -- for seconds at a time. Every one of those writes is a Lua-to-C call on the
 -- thread that also reads the encoders, and the refresh is a serial write on
--- top. Comparing 128 integers first is cheaper than any of it by a wide
--- margin.
+-- top. Comparing 128 integers first is cheaper than any of it.
 local gbuf, gprev = {}, {}
 for i = 1, 128 do gbuf[i], gprev[i] = 0, -1 end
 local grid_last = 0
@@ -7238,10 +6961,10 @@ function grid_redraw()
   -- ...and even a changed frame is only sent as often as GRID FPS allows.
   -- What is missed is picked up on the next tick, because the comparison
   -- above is against what was last SENT, not against the last frame built.
-  -- A millisecond of slack in the comparison. Without it the interval and the
-  -- tick are the same number, floating point decides which is fractionally
-  -- larger, and at the default the throttle halves the rate it was meant to
-  -- leave alone.
+  --
+  -- A millisecond of slack: without it the interval and the tick are the same
+  -- number, floating point decides which is fractionally larger, and at the
+  -- default the throttle halves the rate it was meant to leave alone.
   local now = util.time()
   if (now - grid_last) < ((1 / GRID_FPS) - 0.001) then return end
   grid_last = now
