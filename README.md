@@ -62,6 +62,27 @@ always.
   different bottleneck: not cairo, but up to 128 LED writes and a serial
   frame. The display already skips a refresh entirely when nothing on the grid
   moved; this caps how often it may send one when things are moving.
+- **screen detail** — FULL (default) or LITE. A different economy from screen
+  fps: fps is how *often* a page is drawn, this is how much of it there is to
+  draw, and dropping to 15 while keeping full detail leaves every frame as
+  expensive as it was. LITE takes the antialiasing off COLOUR's sheet and
+  PAPPUS's filaments, samples the sheet at twenty points across instead of
+  thirty, and draws the GRAINSWARM waveform in two-pixel columns rather than
+  one — taking the louder slot of each pair, so a transient is still on the
+  screen rather than averaged away. Cells, headers, values, numbers and the
+  grid are untouched. On the two heaviest pages that is about a quarter of the
+  geometry, before counting what the antialiasing was costing on its own.
+- **mod fps** — 60 (default) or 30, and this one is not free. The modulators
+  run on their own metro, faster than the display, because an LFO stepped at
+  the screen's rate is visibly stepped; sixty a second is eight LFOs advanced,
+  sixteen routings accumulated and every touched destination re-sent, on the
+  same thread as the screen and the encoders. Halving it halves that. What you
+  give up is the top of the RATE knob: the ceiling tracks the update rate at a
+  fifth of it — past which a sine stops being a sine and becomes a staircase —
+  so at 30 the fastest an LFO can run drops from 12 Hz to 6. Everything below
+  is unchanged, the RATE cell shows the resulting Hz either way, and an LFO
+  already set above the new ceiling is pulled down to it rather than left
+  aliasing.
 
 If you are seeing high CPU or hearing clicks on a factory norns, the other
 things worth knowing:

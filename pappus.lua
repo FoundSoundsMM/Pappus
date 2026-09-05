@@ -52,6 +52,9 @@ local NVOICE = 8
 -- that stalls and then jumps.
 local FPS = 25
 local GRID_FPS = 25
+-- SCREEN DETAIL, 1 FULL / 2 LITE. See the "screen detail" param for what it
+-- costs and what it buys; three drawing routines read it.
+local DETAIL = 1
 local MAX_MARKS = 96
 
 -- RATE / DELAY SYNC divisions. the S-4 calls one bar "1/1", so 1/4 is a beat.
@@ -1654,6 +1657,12 @@ local function win_map(p, w)
   return lo + (p * (hi - lo))
 end
 
+-- What the tap layout looked like when it was last sent: eight groups of
+-- step / on / level / pitch, then the cycle and the spread. Quantised
+-- integers, held across calls so the comparison in update_timing allocates
+-- nothing.
+local tapsig = {}
+
 local function update_timing()
   local hz = grain_hz()
   set_if_changed("mrate", hz, function(v) engine.mrate(v) end)
@@ -1720,7 +1729,6 @@ local function update_timing()
   -- machines that happen to share a clock; on, they are one instrument -
   -- silencing a grid row takes its echo with it.
   local link = pval("s_link") == 2
-  local sig = {}
   for i = 1, NTAP do
     local t = taps[i]
     -- LINK follows GRAINSWARM 1. It is the parent, and a delay that changed
@@ -1743,11 +1751,45 @@ local function update_timing()
     else
       t.pitch = snap_to_scale(util.round(pspread_base(i, spread)), mscale)
     end
-    sig[i] = string.format("%d%d%.2f%.2f", t.step, t.on and 1 or 0, t.lvl, t.pitch)
   end
-  local key = table.concat(sig, ",") .. ":" .. string.format("%.4f,%.3f", cycle, spread)
-  if sent.taps ~= key then
-    sent.taps = key
+
+  -- HAS THE TAP LAYOUT MOVED? Asked of the NUMBERS, not of a string built out
+  -- of them.
+  --
+  -- This used to format eight "%d%d%.2f%.2f" strings, concatenate them into a
+  -- key and compare that - ten throwaway strings per call, and this is called
+  -- from the display tick, so twenty-five times a second, almost always to
+  -- discover that nothing had moved. On a Pi that is a quarter of a thousand
+  -- allocations a second the collector then has to walk.
+  --
+  -- Same quantisation as the format strings had, so the same movements count
+  -- as a change and the same ones are ignored; tapsig holds what was last
+  -- sent. sent.taps stays the invalidation flag it always was - six places
+  -- set it to nil to force a resend - it just no longer carries the key.
+  local changed = sent.taps == nil
+  for i = 1, NTAP do
+    local t = taps[i]
+    local b = (i - 1) * 4
+    local st, on = t.step, t.on and 1 or 0
+    local lv = math.floor(t.lvl * 100 + 0.5)
+    local pt = math.floor(t.pitch * 100 + 0.5)
+    if tapsig[b + 1] ~= st or tapsig[b + 2] ~= on
+      or tapsig[b + 3] ~= lv or tapsig[b + 4] ~= pt then
+      tapsig[b + 1], tapsig[b + 2] = st, on
+      tapsig[b + 3], tapsig[b + 4] = lv, pt
+      changed = true
+    end
+  end
+  do
+    local cq = math.floor(cycle * 10000 + 0.5)
+    local sq = math.floor(spread * 1000 + 0.5)
+    if tapsig[33] ~= cq or tapsig[34] ~= sq then
+      tapsig[33], tapsig[34] = cq, sq
+      changed = true
+    end
+  end
+  if changed then
+    sent.taps = true
     engine.taptimes(taps[1].time, taps[2].time, taps[3].time, taps[4].time,
                     taps[5].time, taps[6].time, taps[7].time, taps[8].time)
     engine.taplevels(taps[1].lvl, taps[2].lvl, taps[3].lvl, taps[4].lvl,
@@ -1807,6 +1849,9 @@ end
 -- still owns the parameter; the LFO only offsets what gets sent.
 -- ---------------------------------------------------------------------------
 
+-- MOD_FPS and its clamp move together, and PERFORMANCE can lower them - see
+-- the "mod fps" param. Not `const`: the two are read live everywhere, so
+-- changing them here changes the instrument from the next tick on.
 local MOD_FPS = 60
 local MOD_MAX_HZ = 12
 -- Eight LFOs, two destinations each: sixteen routings.
@@ -2080,9 +2125,41 @@ local function mod_advance(dt)
   end
 end
 
+-- MOD_APPLY'S SCRATCH, HELD ACROSS CALLS.
+--
+-- This runs at MOD_FPS - sixty times a second by default - and it used to
+-- build four tables and a closure on every one of them: acc, seen, touched, a
+-- lazily-created stale list, and the `route` function itself. That is around
+-- three hundred objects a second whose entire life is one tick, and on a Pi
+-- the cost is not the allocation so much as the collector walking them.
+--
+-- Reusing them in place is safe because norns runs every metro on the one Lua
+-- thread: nothing can read mod_assigned part-way through the rebuild below,
+-- because nothing else runs until mod_apply returns. mod_assigned and
+-- mod_seen are the same table from here on, which is also why mod_assigned is
+-- no longer reassigned each tick.
+local mod_acc = {}
+local mod_seen = mod_assigned
+local mod_touched = {}
+local mod_stale = {}
+
+-- ...and the eight LFO slots already had their ids precomputed in LFO_ID; the
+-- envelope's two were still being concatenated here on every tick.
+local ENV_ID = { { d = "env_d1", a = "env_a1" }, { d = "env_d2", a = "env_a2" } }
+
+local function mod_route(di, amt, val)
+  if di <= 1 then return end
+  local id = MOD_DESTS[di].id
+  mod_seen[id] = true
+  if amt ~= 0 then
+    mod_acc[id] = (mod_acc[id] or 0) + (val * amt * amt * math.abs(amt))
+  end
+end
+
 local function mod_apply()
-  local acc = {}
-  local seen = {}
+  local acc, seen = mod_acc, mod_seen
+  for k in pairs(acc) do acc[k] = nil end
+  for k in pairs(seen) do seen[k] = nil end
   -- THE AMOUNT IS CUBED, and the reason is that the amount is a FRACTION OF
   -- THE WHOLE PARAMETER RANGE. An LFO at 0.2 was moving its destination
   -- through a fifth of everything it can do - a fifth of RESO is the
@@ -2095,25 +2172,17 @@ local function mod_apply()
   -- the travel, which is where a modulation amount is actually set from.
   --
   -- Signed, so a negative amount bends identically in the other direction.
-  local function route(di, amt, val)
-    if di <= 1 then return end
-    local id = MOD_DESTS[di].id
-    seen[id] = true
-    if amt ~= 0 then
-      acc[id] = (acc[id] or 0) + (val * amt * amt * math.abs(amt))
-    end
-  end
-
+  -- (The routing itself is mod_route, above.)
   if params:get("mod_bypass") ~= 2 then
     for i = 1, NLFO do
-      route(params:get(LFO_ID[i].d1), params:get(LFO_ID[i].a1), lfos[i].val)
-      route(params:get(LFO_ID[i].d2), params:get(LFO_ID[i].a2), lfos[i].val)
+      local v = lfos[i].val
+      mod_route(params:get(LFO_ID[i].d1), params:get(LFO_ID[i].a1), v)
+      mod_route(params:get(LFO_ID[i].d2), params:get(LFO_ID[i].a2), v)
     end
     for s = 1, 2 do
-      route(params:get("env_d" .. s), params:get("env_a" .. s), env.val)
+      mod_route(params:get(ENV_ID[s].d), params:get(ENV_ID[s].a), env.val)
     end
   end
-  mod_assigned = seen
 
   -- Applying a destination means calling that parameter's OWN action with the
   -- modulated value. For most that is the engine send it already had; for the
@@ -2130,15 +2199,17 @@ local function mod_apply()
 
   -- hand back anything that stopped being modulated, exactly once, or it stays
   -- stuck wherever the modulator left it
-  local stale
+  local stale = mod_stale
+  local nstale = 0
   for id in pairs(mod_delta) do
     if acc[id] == nil then
-      stale = stale or {}
-      stale[#stale + 1] = id
+      nstale = nstale + 1
+      stale[nstale] = id
     end
   end
-  if stale then
-    for _, id in ipairs(stale) do
+  if nstale > 0 then
+    for i = 1, nstale do
+      local id = stale[i]
       mod_delta[id] = nil
       mod_sent[id] = nil
     end
@@ -2147,9 +2218,10 @@ local function mod_apply()
 
   if not changed then return end
 
-  local touched = {}
+  local touched = mod_touched
+  for k in pairs(touched) do touched[k] = nil end
   for id in pairs(acc) do touched[id] = true end
-  if stale then for _, id in ipairs(stale) do touched[id] = true end end
+  for i = 1, nstale do touched[stale[i]] = true end
 
   for id in pairs(touched) do
     local v = pval(id)
@@ -2970,6 +3042,55 @@ local function add_params()
   params:set_action("grid_fps", function(x)
     GRID_FPS = ({ 25, 15, 10 })[x] or 25
   end)
+
+  -- MOD FPS, and this one is NOT free - which is why it is last and why it
+  -- says so here.
+  --
+  -- The modulators run on their own metro, faster than the display, because
+  -- an LFO stepped at the screen's rate is visibly stepped. Sixty a second is
+  -- eight LFOs advanced, sixteen routings accumulated and every touched
+  -- destination re-sent to the engine, on the same thread as the screen and
+  -- the encoders. On a Pi 3 that is the second largest thing this script does
+  -- with a frame, after drawing it.
+  --
+  -- Halving it halves that. What you give up is at the top of the RATE knob:
+  -- the ceiling tracks the update rate at a fifth of it - the point past
+  -- which a sine stops being a sine and becomes a staircase - so at 30 the
+  -- fastest an LFO can run drops from 12 Hz to 6. Everything below that is
+  -- unchanged, and the RATE cell shows the resulting Hz, so the new ceiling
+  -- is visible rather than mysterious. An LFO already set above it is pulled
+  -- down to it, not left aliasing.
+  -- SCREEN DETAIL.
+  --
+  -- Separate from screen fps because it is a different economy: fps is how
+  -- OFTEN a page is drawn, this is how much of it there is to draw. Dropping
+  -- to 15 fps and keeping full detail leaves every frame as expensive as it
+  -- was, which is what still holds the encoder queue shut when one lands.
+  --
+  -- LITE does three things, all of them to the largest runs of geometry in
+  -- the script and none of them to anything you read:
+  --
+  --   * COLOUR's sheet loses its antialiasing and is sampled at twenty
+  --     points across instead of thirty
+  --   * PAPPUS's filaments lose their antialiasing
+  --   * the GRAINSWARM waveform is drawn in two-pixel columns rather than
+  --     one, taking the louder slot of each pair so nothing is averaged out
+  --
+  -- Cells, headers, values, the grid and every number stay exactly as they
+  -- are. This is the visualisers giving up some of their smoothness, which is
+  -- the right thing to spend when the alternative is a knob that jumps.
+  params:add_option("detail", "screen detail", { "FULL", "LITE" }, 1)
+  params:set_action("detail", function(x) DETAIL = x end)
+
+  params:add_option("mod_fps", "mod fps", { "60", "30" }, 1)
+  params:set_action("mod_fps", function(x)
+    MOD_FPS = ({ 60, 30 })[x] or 60
+    MOD_MAX_HZ = math.min(12, MOD_FPS / 5)
+    if mod_metro then
+      mod_metro.time = 1 / MOD_FPS
+      mod_metro:start()
+    end
+  end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -3051,13 +3172,17 @@ local function advance_swarm(dt, w)
   V.slot_peak = math.max(V.slot_peak, lvl)
   V.wpos = (V.wpos + (dt / buflen(w))) % 1
   local slot = util.clamp(math.floor(V.wpos * WAVE_N) + 1, 1, WAVE_N)
+  -- the loudest slot WRITTEN this frame, for the peak follower's attack below
+  local wrote = 0
   if slot ~= V.last_slot then
     -- fill any slots skipped between frames so there are no gaps
     local i = V.last_slot
     local guard = 0
     repeat
       i = (i % WAVE_N) + 1
-      V.wave[i] = math.min((V.wave[i] * ret) + (V.slot_peak * ing), 1)
+      local v = math.min((V.wave[i] * ret) + (V.slot_peak * ing), 1)
+      V.wave[i] = v
+      if v > wrote then wrote = v end
       guard = guard + 1
     until i == slot or guard > WAVE_N
     V.last_slot = slot
@@ -3067,15 +3192,36 @@ local function advance_swarm(dt, w)
   -- the display normalises against the loudest slot, with a floor so silence
   -- is not amplified into noise. raw input amplitude is far too small to read
   -- at ten pixels of half-height otherwise.
-  local mx = 0
-  for i = 1, WAVE_N do
-    if V.wave[i] > mx then mx = V.wave[i] end
-  end
-  -- instant attack, slow release, so the display does not pump on every hit
-  if mx > V.wave_peak then
-    V.wave_peak = mx
-  else
-    V.wave_peak = V.wave_peak + ((mx - V.wave_peak) * 0.05)
+  --
+  -- The FULL scan runs every PSCAN frames, not every frame. It is a hundred
+  -- and twenty-eight comparisons per granulator - two hundred and fifty-six a
+  -- frame for the pair - feeding a follower whose release is already 0.05 per
+  -- frame, i.e. about a second and a half to fall. Sampling that four times
+  -- slower moves the release by nothing anyone can see.
+  --
+  -- The ATTACK is not sampled, and that is the point of splitting them: a new
+  -- peak has to be caught on the frame it arrives or the trace visibly
+  -- overshoots the top of the band before the normaliser catches up. The scan
+  -- is looking for the largest value in V.wave, and between scans the only
+  -- way a larger one can appear is for this frame to have WRITTEN it - so the
+  -- fill loop above reports the loudest slot it wrote and the attack tests
+  -- that. One comparison rather than a hundred and twenty-eight, and it
+  -- cannot miss a peak.
+  V.pscan = (V.pscan or 0) + 1
+  if V.pscan >= 4 then
+    V.pscan = 0
+    local mx = 0
+    for i = 1, WAVE_N do
+      if V.wave[i] > mx then mx = V.wave[i] end
+    end
+    -- instant attack, slow release, so the display does not pump on every hit
+    if mx > V.wave_peak then
+      V.wave_peak = mx
+    else
+      V.wave_peak = V.wave_peak + ((mx - V.wave_peak) * 0.05 * 4)
+    end
+  elseif wrote > V.wave_peak then
+    V.wave_peak = wrote
   end
 
   -- scan head
@@ -3387,11 +3533,20 @@ end
 local SNAP_N = 120                  -- fifteen columns of eight, the grid exactly
 local SNAP_W = 15
 local SNAP_HOLD = 0.6                 -- how long a hold has to be
+-- `anim` is not `busy`: busy is snap_store/snap_recall's re-entrancy guard.
+-- This one says whether any of the hundred and twenty squares still has
+-- somewhere to get to, so snap_advance can skip the walk when none of them
+-- does - see there for why that matters.
 local snap = { sel = 1, last = 0, hold = nil, mod16 = {},
-               busy = false, fill = {}, want = {}, pulse = {}, act = nil }
+               busy = false, anim = true,
+               fill = {}, want = {}, pulse = {}, act = nil }
 for i = 1, SNAP_N do
   snap.fill[i], snap.want[i], snap.pulse[i] = 0, 0, 0
 end
+
+-- Anything that gives a slot a new destination has to say so, or the walk
+-- below stays asleep and the square never travels.
+local function snap_wake() snap.anim = true end
 
 -- Start a hold. The animation runs WITH the finger rather than after it, so
 -- the square fills as you press and drains back if you let go early - which
@@ -3416,6 +3571,7 @@ function snap_hold_end()
   if (util.time() - a.t0) >= SNAP_HOLD then
     if a.mode == "save" then snap_store(a.slot) else snap_clear(a.slot) end
     snap.pulse[a.slot] = 1
+    snap_wake()
     return true
   end
   return false
@@ -3483,6 +3639,7 @@ function snap_store(n)
   end
   scenes[n] = sc
   snap.want[n] = 1
+  snap_wake()
   snap.last = n
   snap_save_table()
 end
@@ -3661,6 +3818,7 @@ function snap_clear(n)
   local sc = scenes[n]
   scenes[n] = nil
   snap.want[n] = 0
+  snap_wake()
   for _, w in ipairs({ sc.wav, sc.wavr, sc.wav2, sc.wav2r }) do
     pcall(os.remove, w)
   end
@@ -3686,30 +3844,59 @@ function snap_advance(dt)
       a.done = true
       if a.mode == "save" then snap_store(a.slot) else snap_clear(a.slot) end
       snap.pulse[a.slot] = 1
+      snap_wake()
     end
   end
+
+  -- A HUNDRED AND TWENTY SQUARES, ON EVERY PAGE, EVERY FRAME.
+  --
+  -- This walk runs from the display tick, so it ran on GRAINSWARM and COLOUR
+  -- and everywhere else, easing a grid of squares only two pages ever draw -
+  -- and finding, almost always, that every one of them was already exactly
+  -- where it wanted to be. Measured at six per cent of everything this script
+  -- does with a frame, to move nothing.
+  --
+  -- So it sleeps. Anything that gives a square a new destination calls
+  -- snap_wake, the walk runs until the last one has arrived, and then it
+  -- stops until something else moves. A held slot keeps it awake on its own
+  -- account: the finger is still driving that square above.
+  if not (snap.anim or held) then return end
   local k = math.min(dt * 5.5, 1)
+  local moving = false
   for i = 1, SNAP_N do
     -- a slot being held is driven by the finger; everything else eases to
     -- where it belongs, which is also what pulls an abandoned hold back
     if i ~= held then
       local w = snap.want[i]
       local f = snap.fill[i]
-      if math.abs(w - f) < 0.004 then
-        snap.fill[i] = w
-      else
-        snap.fill[i] = f + ((w - f) * k)
+      if w ~= f then
+        if math.abs(w - f) < 0.004 then
+          snap.fill[i] = w
+        else
+          snap.fill[i] = f + ((w - f) * k)
+          moving = true
+        end
       end
     end
-    if (snap.pulse[i] or 0) > 0 then
-      snap.pulse[i] = math.max(0, snap.pulse[i] - (dt / 0.45))
+    local pu = snap.pulse[i]
+    if pu and pu > 0 then
+      snap.pulse[i] = math.max(0, pu - (dt / 0.45))
+      moving = true
     end
   end
+  -- A HELD slot keeps the walk awake past the release. Its fill is being
+  -- driven by the finger above and is therefore skipped below, so `moving`
+  -- never sees it - and the frame the finger comes off is exactly the frame
+  -- that has to notice the square is no longer where it wants to be and start
+  -- easing it back. Falling asleep while held would strand an abandoned hold
+  -- half filled.
+  snap.anim = moving or (held ~= nil)
 end
 
 -- something happened to this slot: swell and settle
 function snap_pulse(i)
   snap.pulse[i] = 1
+  snap_wake()
 end
 
 function snap_state()
@@ -3868,6 +4055,11 @@ function init()
     -- before anything else: the grain tick seeds the scene, and it can only
     -- do that if it already knows whether the scene is on screen
     pappus_live = (PAGES[page].kind == "pappus")
+    do
+      local sl = (PAGES[page].kind == "spettru")
+      if sl and not spettru_live then spettru_seed = true end
+      spettru_live = sl
+    end
     update_timing()
     advance(dt)
     mach_advance(dt)
@@ -4854,19 +5046,39 @@ function draw_waveform()
     -- the same raised brightness `locked` already drove below.
     local inlev, outlev = (locked and 9 or 6), (locked and 3 or 2)
     local lev = nil
-    for i = SWB_W + 2, WAVE_N do
+    -- ONE COLUMN PER SLOT, OR ONE PER TWO.
+    --
+    -- The trace is a hundred and ten separate move/line pairs - by some way
+    -- the largest single thing on this page - and cairo pays for each of them
+    -- whether it is one pixel wide or two. LITE walks the slots in twos and
+    -- draws a two-pixel column, which covers exactly the same pixels with
+    -- half the path: the taller of each pair wins, so a transient that landed
+    -- in one slot is still on the screen rather than averaged away.
+    local step = (DETAIL == 1) and 1 or 2
+    if step == 2 then screen.line_width(2) end
+    for i = SWB_W + 2, WAVE_N, step do
       local want = ((i - 1) >= ilo - 1 and (i - 1) <= ihi) and inlev or outlev
       if want ~= lev then
         if lev then screen.stroke() end
         screen.level(want)
         lev = want
       end
-      local h = (math.min(V.wave[i] / norm, 1) ^ 0.7) * maxh
+      local a = V.wave[i]
+      if step == 2 then
+        local b = V.wave[i + 1]
+        if b and b > a then a = b end
+      end
+      local h = (math.min(a / norm, 1) ^ 0.7) * maxh
       if h < 0.5 then h = 0.5 end
-      screen.move(i - 0.5, cy - h)
-      screen.line(i - 0.5, cy + h)
+      -- width 1 sits on the half-pixel and covers column i-1; width 2 sits on
+      -- the integer boundary and covers i-1 and i
+      local x = (step == 1) and (i - 0.5) or i
+      screen.move(x, cy - h)
+      screen.line(x, cy + h)
     end
     screen.stroke()
+    -- back to 1, or everything drawn after this on the frame inherits it
+    if step == 2 then screen.line_width(1) end
   end
 
   -- active window: a bracket along the top edge. Grains only ever read from
@@ -5155,7 +5367,10 @@ function draw_kuluri()
   local cy = top + (h / 2)
   local byp = (params:get("bypass") == 2)
 
-  screen.aa(1)
+  -- ANTIALIASING, and this is the one page where it is genuinely expensive:
+  -- the sheet is the largest run of stroked curves in the script, and an
+  -- antialiased stroke in software cairo costs several times an aliased one.
+  screen.aa((DETAIL == 1) and 1 or 0)
   screen.stroke()          -- clear the current point left by screen.text
 
   -- a grain landing throws a perturbation across the field: GRAINSWARM 1's
@@ -5176,7 +5391,11 @@ function draw_kuluri()
     end
   end
 
-  local STEPS = 30
+  -- Thirty samples across is a spacing of 4.3 px; twenty is 6.4. On curves
+  -- this shallow the difference is visible if you look for it and invisible
+  -- if you are playing, and it is a third of the segments off the heaviest
+  -- page in the script.
+  local STEPS = (DETAIL == 1) and 30 or 20
   local dx = 128 / STEPS
 
   -- the swell. Never zero: a dead field is a page that looks broken rather
@@ -5488,18 +5707,43 @@ end
 -- a phase that gets randomised on every grain landing is a phase that jumps,
 -- and a jump reads as a glitch, not a wobble. What moves is only the
 -- amplitude, which tracks the live level.
+-- Is RESONATOR the page on screen? Nothing else reads sring, sp_lo or sp_hi,
+-- so nothing else needs them advanced - see spettru_strings. Set from the
+-- display tick alongside pappus_live.
+-- Both globals, like pappus_live: they are written from the display tick in
+-- init, which is a long way above this point in the file, and a local
+-- declared here would not be in scope there - the assignment would silently
+-- make a second, global variable and this one would never change.
+spettru_live = false
+spettru_seed = false
+
 local sring = {}
 for i = 1, NBAND do
   sring[i] = { a = 0, ph = (i * 2.399963) % (2 * math.pi) }
 end
 
 function spettru_strings(dt)
+  -- FORTY-EIGHT RESONATORS EASED ON EVERY PAGE.
+  --
+  -- This is the RESONATOR visualiser's state and nothing else ever reads it,
+  -- but it ran from the display tick, so COLOUR and GRAINSWARM and the rest
+  -- were each paying for a picture they do not draw - measured at about six
+  -- per cent of everything a frame costs.
+  --
+  -- Arriving at the page SEEDS rather than fades: the ring is snapped
+  -- straight to where the live signal says it belongs on the first frame,
+  -- because a bank that swells up from wherever it was left ten minutes ago
+  -- is an animation of nothing, and it reads as the page loading.
+  if not spettru_live then return end
+  local seed = spettru_seed
+  spettru_seed = false
+
   -- how quickly the wobble's size follows the live level. Reuses DAMPING's
   -- curve so a long DAMPING still reads as a slower, more liquid picture,
   -- but as a settling time on an envelope follower now, not a decay after a
   -- kick - there is no kick left to decay from.
   local rt = 0.003 * (900 ^ util.clamp(pval("p_damp"), 0, 1))
-  local ease = 1 - math.exp(-dt / math.max(rt * 1.6, 0.22))
+  local ease = seed and 1 or (1 - math.exp(-dt / math.max(rt * 1.6, 0.22)))
   local drive = math.min(out_amp_disp * 2.4, 1)
   local lo, hi = 1e9, -1e9
   for i = 1, NBAND do
@@ -5522,7 +5766,7 @@ function spettru_strings(dt)
       local mid = math.sqrt(wlo * whi)
       wlo, whi = mid / 2, mid * 2
     end
-    local e = math.min(dt * 2.5, 1)
+    local e = seed and 1 or math.min(dt * 2.5, 1)
     sp_lo = sp_lo + ((util.clamp(wlo, 20, 8000) - sp_lo) * e)
     sp_hi = sp_hi + ((util.clamp(whi, 60, 16000) - sp_hi) * e)
   end
@@ -6316,7 +6560,9 @@ do
 
   function draw_pappus()
     screen.clear()
-    screen.aa(1)
+    -- a busy scene is a couple of hundred antialiased filaments; see the
+    -- "screen detail" param
+    screen.aa((DETAIL == 1) and 1 or 0)
     screen.line_width(1)
 
     local drive = vis and vis.drive or 0
@@ -6849,6 +7095,23 @@ function grid_redraw()
     gprev[1] = -1
     return
   end
+  -- THE THROTTLE COMES FIRST, before the buffer is built rather than after it
+  -- was built and diffed. Inside the window there is nothing this call can do
+  -- with a frame - it is not allowed to send one - so laying out 128 LEDs and
+  -- comparing them against gprev is work whose only possible outcome is being
+  -- thrown away. At grid fps 10 against a 25 fps display that is three ticks
+  -- in five doing exactly that.
+  --
+  -- Nothing is lost by skipping them: the diff below is against what was last
+  -- SENT, not against the last frame built, so whatever moved during the
+  -- window is still a difference on the tick that clears it.
+  --
+  -- A millisecond of slack: without it the interval and the tick are the same
+  -- number, floating point decides which is fractionally larger, and at the
+  -- default the throttle halves the rate it was meant to leave alone.
+  local now = util.time()
+  if (now - grid_last) < ((1 / GRID_FPS) - 0.001) then return end
+
   for i = 1, 128 do gbuf[i] = 0 end
   local nn = cols()
   local kind = PAGES[page].kind
@@ -6958,15 +7221,9 @@ function grid_redraw()
     if gbuf[i] ~= gprev[i] then dirty = true; break end
   end
   if not dirty then return end
-  -- ...and even a changed frame is only sent as often as GRID FPS allows.
-  -- What is missed is picked up on the next tick, because the comparison
-  -- above is against what was last SENT, not against the last frame built.
-  --
-  -- A millisecond of slack: without it the interval and the tick are the same
-  -- number, floating point decides which is fractionally larger, and at the
-  -- default the throttle halves the rate it was meant to leave alone.
-  local now = util.time()
-  if (now - grid_last) < ((1 / GRID_FPS) - 0.001) then return end
+  -- grid_last only moves when a frame is actually SENT. Stamping it up at the
+  -- throttle instead would restart the clock on every tick that found nothing
+  -- to say, so a grid that then moved would wait a further whole interval.
   grid_last = now
 
   g:all(0)
