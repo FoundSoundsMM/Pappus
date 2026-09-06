@@ -57,6 +57,101 @@ local GRID_FPS = 25
 local DETAIL = 1
 local MAX_MARKS = 96
 
+-- ---------------------------------------------------------------------------
+-- LITE - which machine is this
+-- ---------------------------------------------------------------------------
+
+-- A factory norns is a Raspberry Pi 3 compute module. A shield is whatever the
+-- owner put underneath it, which since 2019 is usually a Pi 4. The whole
+-- instrument - two granulators, forty-eight resonators, a real short-time
+-- Fourier transform, a screen redraw and sixty modulator updates a second -
+-- measures comfortable on a Pi 4 and lands at ninety per cent plus, with audio
+-- dropouts, on a Pi 3. PARAMS > PERFORMANCE existed to let an owner claw some
+-- of that back by hand, and the reports kept coming: a page of settings is not
+-- a fix if you have to know to go and find it.
+--
+-- So the script asks what it is running on and builds itself accordingly.
+-- Engine_Pappus.sc RUNS THE SAME TEST, in prLiteMode, off the same two files
+-- and the same override, and compiles a smaller graph when it fails - the two
+-- have to agree, because the engine's answer decides whether GRAINSWARM 2
+-- makes any sound and this one decides whether its pages exist.
+--
+-- Three inputs, in order of authority:
+--
+--   PAPPUS_LITE      an environment variable, for the test harness - 1/lite
+--                    forces LITE, 0/full forces FULL
+--   mode.txt         in the script's own data folder, holding "lite" or
+--                    "full". This is what the ENGINE param on PARAMS >
+--                    PERFORMANCE writes, for an owner who disagrees with the
+--                    detection - a Pi 3 shield with nothing else running, or
+--                    a Pi 4 with a heavy pset and a full audio/ folder.
+--   the device tree  bcm2711 (Pi 4, 400, CM4) and bcm2712 (Pi 5, CM5) are
+--                    FULL; any other Raspberry Pi is LITE
+--
+-- A machine with no device tree at all - a desktop running the test harness -
+-- is FULL. Unknown is not the same as slow.
+--
+-- No new file-level local for the reader: the main chunk is at Lua's two
+-- hundred local ceiling, so it lives inside the function that uses it.
+function lite_mode()
+  local function head(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local t = f:read(4096)
+    f:close()
+    return t
+  end
+  local env = os.getenv("PAPPUS_LITE")
+  if env then
+    env = env:lower()
+    if env == "1" or env == "lite" or env == "true" or env == "yes" then
+      return true
+    end
+    if env == "0" or env == "full" or env == "false" or env == "no" then
+      return false
+    end
+  end
+  -- The override, if the owner wrote one. norns.state.data is this script's
+  -- own data folder, the same place scenes.data lives.
+  if norns and norns.state and norns.state.data then
+    local t = head(norns.state.data .. "mode.txt")
+    if t then
+      t = t:lower()
+      if t:find("lite", 1, true) then return true end
+      if t:find("full", 1, true) then return false end
+    end
+  end
+  -- /proc/device-tree/compatible is NUL-separated - "raspberrypi,4-model-b"
+  -- then "brcm,bcm2711" - and a plain byte read hands the NULs back as
+  -- ordinary characters, so a find still locates either half. Both files are
+  -- read because a Compute Module names itself in `model` and its SoC only in
+  -- `compatible`.
+  local dt = ""
+  for _, f in ipairs({ "/proc/device-tree/compatible",
+                       "/proc/device-tree/model" }) do
+    local t = head(f)
+    if t then dt = dt .. t:lower() .. " " end
+  end
+  if not (dt:find("bcm", 1, true) or dt:find("raspberry", 1, true)) then
+    return false
+  end
+  for _, k in ipairs({ "bcm2711", "bcm2712", "pi 4", "pi 5",
+                       "compute module 4", "compute module 5" }) do
+    if dt:find(k, 1, true) then return false end
+  end
+  return true
+end
+
+-- Global, not local: the main chunk is at Lua's two hundred local ceiling and
+-- this is read from a dozen places.
+LITE = lite_mode()
+
+-- MODAL's partials per voice that the ENGINE ACTUALLY RUNS. LITE builds
+-- twenty-four resonators out of the forty-eight - partials one to three of
+-- each voice - so the bank's power normalisation and its picture both have to
+-- count the same three. See the MODAL note in Engine_Pappus.sc.
+NPART_USE = LITE and 3 or 6
+
 -- RATE / DELAY SYNC divisions. the S-4 calls one bar "1/1", so 1/4 is a beat.
 local DIVS = {
   { name = "4/1",  beats = 16    },
@@ -615,11 +710,35 @@ function vis_swarm()
   return (pg and pg.sw) or 1
 end
 
+--
+-- ON LITE, GRAINSWARM 2'S TWO PAGES ARE NOT IN EITHER LANE. The engine has no
+-- second granulator to drive (see the LITE note in Engine_Pappus.sc), and two
+-- pages of live-looking controls over silence is the worst of the three
+-- options - worse than not having them, and much worse than saying so.
+--
+-- They are dropped from the LANES rather than from PAGES, and that is
+-- deliberate. `page` is only ever assigned from lane_page, so the lanes are
+-- the whole of navigation; PAGES, meanwhile, is what builds `sel`, the
+-- modulation destination list and every option index a pset stores. Shortening
+-- it would renumber MOD_DESTS - a pset written on a Pi 4 would come back here
+-- with its LFOs pointing at the wrong parameters, silently. So the table stays
+-- forty-something entries long and the two pages simply have no route to them.
 local LANE = { { }, { }, at = { 1, 1 }, n = 1 }
 for i, pg in ipairs(PAGES) do
   local mod = (pg.kind == "magna" or pg.kind == "envmod")
-  local L = LANE[mod and 2 or 1]
-  L[#L + 1] = i
+  local gone = LITE and pg.sw == 2
+  if not gone then
+    local L = LANE[mod and 2 or 1]
+    L[#L + 1] = i
+  end
+end
+
+-- ...and the remaining pair says "1/2" and "2/2" rather than 1/4 and 2/4 of a
+-- set half of which cannot be reached. The dots are display only.
+if LITE then
+  for _, pg in ipairs(PAGES) do
+    if pg.sw == 1 and pg.dots then pg.dots[2] = 2 end
+  end
 end
 
 -- which page is showing. `page` itself stays local; this is the read-only
@@ -660,6 +779,20 @@ function goto_page_index(i)
   for ln = 1, 2 do
     for k, pi in ipairs(LANE[ln]) do
       if pi == i then LANE.n, LANE.at[ln], page = ln, k, i ; return true end
+    end
+  end
+  return false
+end
+
+-- Can you actually get to that page? On LITE two of them are not in either
+-- lane (see the LANE note above), so the answer is no and the tests that sweep
+-- every page have to be able to ask - a walk that silently stayed where it was
+-- would then test one page's cells against another page's knobs and report
+-- four hundred failures about the wrong thing.
+function page_reachable(i)
+  for ln = 1, 2 do
+    for _, pi in ipairs(LANE[ln]) do
+      if pi == i then return true end
     end
   end
   return false
@@ -1341,6 +1474,18 @@ end
 
 local NPART = 6                       -- partials per voice, MODAL
 local NBAND = NVOICE * NPART          -- forty-eight resonators
+
+-- Which of the forty-eight the ENGINE built. The layout is voice-major with a
+-- stride of NPART, so the partial number inside a voice is the index modulo
+-- six, and LITE runs the first NPART_USE of each group (see NPART_USE at the
+-- top of the file, and the MODAL note in Engine_Pappus.sc). On FULL this is
+-- true for every index and the branch costs one modulo.
+--
+-- Global rather than local, for the same reason LITE is: the main chunk is at
+-- Lua's two hundred local ceiling.
+function band_live(i)
+  return ((i - 1) % NPART) < NPART_USE
+end
 local PQ_REF = 261.6256               -- C4: what a grain at semitone 0 rings
 
 -- what was last sent, so a still bank is not re-sent sixty times a second
@@ -1450,8 +1595,19 @@ function spettru_layout()
         gd = falloff ^ (k - 1)                              -- BRIGHTNESS rolloff
         gd = gd * (freeish and 1 or st.lvl)
         g = gd * math.abs(math.sin(math.pi * pos * k))      -- POSITION mode-shape
-        sumsq = sumsq + (g * g)
-        sumsq_d = sumsq_d + (gd * gd)
+        -- NORMALISE OVER THE PARTIALS THIS BUILD ACTUALLY RUNS. On LITE the
+        -- engine instantiates the first three of each voice's six and ignores
+        -- the rest (see the MODAL note in Engine_Pappus.sc), so counting all
+        -- six here would spread the bank's power across resonators that are
+        -- not there and RESONATOR would come out quieter on a factory norns
+        -- than on a shield - by however much BRIGHTNESS happened to have left
+        -- in the top three, which is not a constant and so is not something a
+        -- fudge factor in the engine could put back. Counting the same three
+        -- the engine builds makes both level-neutral by construction.
+        if k <= NPART_USE then
+          sumsq = sumsq + (g * g)
+          sumsq_d = sumsq_d + (gd * gd)
+        end
       end
       f[i], a[i], ad[i] = hz, g, gd
     end
@@ -1689,10 +1845,15 @@ local function update_timing()
   -- ---- GRAINSWARM 2, the same three derived values ----
   -- Its RATE is a ratio of swarm 1's, so this has to be recomputed whenever
   -- swarm 1's rate, the tempo, or the ratio itself moves. All three land here.
-  set_if_changed("nrate", grain_hz(2), function(v) engine.nrate(v) end)
-  set_if_changed("nsize", util.clamp(pval("n_size") * spb, 0.002, 8),
-    function(v) engine.nsize(v) end)
-  do
+  --
+  -- Not on LITE, where there is nothing at the other end of them. This runs
+  -- every display frame, so it is three parameter reads, a division list
+  -- lookup and three change comparisons twenty-five times a second for a
+  -- granulator that does not exist.
+  if not LITE then
+    set_if_changed("nrate", grain_hz(2), function(v) engine.nrate(v) end)
+    set_if_changed("nsize", util.clamp(pval("n_size") * spb, 0.002, 8),
+      function(v) engine.nsize(v) end)
     local m2 = pval("n_scan_mode")
     local sc2 = pval("n_scan")
     local d2 = 0
@@ -3013,6 +3174,74 @@ local function add_params()
 
   params:add_separator("perf", "PERFORMANCE")
 
+  -- ENGINE, and it is FIRST because it is the one that decides what all the
+  -- rest of this page is for.
+  --
+  -- AUTO reads the machine: a Pi 4 or newer gets the whole instrument, a
+  -- factory norns or an older shield gets LITE - one granulator, half the
+  -- resonator bank, LOSS as a filter rather than a transform, and a screen
+  -- and modulator rate that a Pi 3 can hold. What LITE takes out is listed in
+  -- the readme and at each site in Engine_Pappus.sc.
+  --
+  -- The two overrides are for the cases detection cannot see. FULL is for a
+  -- Pi 3 owner who wants both granulators and will pay for them - a shield
+  -- with nothing else running, a light pset, an empty audio/ folder. LITE is
+  -- for a Pi 4 owner who is running out of headroom anyway, because a Pi 4
+  -- with a full audio/ folder and every stage lit is not automatically fine.
+  --
+  -- IT TAKES EFFECT ON THE NEXT LOAD, and it has to: the engine's graph is a
+  -- SynthDef, compiled once when the engine is allocated, and a SynthDef's
+  -- topology is fixed from that moment. So this writes a file that both sides
+  -- read at load - the engine in prLiteMode, the script in lite_mode - and
+  -- says so in its own label rather than pretending to switch.
+  --
+  -- THE DEFAULT IS WHATEVER THE FILE ALREADY SAYS, and it has to be read here
+  -- rather than assumed. This param is not saved in a pset (see below), so it
+  -- comes back as its default on every load - and params:bang runs its action
+  -- with that default. A hardcoded AUTO would therefore delete the override on
+  -- the very next load, which is the one place the setting has to survive.
+  local stored = 1
+  if norns and norns.state and norns.state.data then
+    local f = io.open(norns.state.data .. "mode.txt", "r")
+    if f then
+      local t = (f:read(64) or ""):lower()
+      f:close()
+      if t:find("lite", 1, true) then stored = 3
+      elseif t:find("full", 1, true) then stored = 2 end
+    end
+  end
+  params:add_option("engine_mode", "engine (next load)",
+    { "AUTO", "FULL", "LITE" }, stored)
+  params:set_action("engine_mode", function(x)
+    if not (norns and norns.state and norns.state.data) then return end
+    local path = norns.state.data .. "mode.txt"
+    if x == 1 then
+      os.remove(path)
+    else
+      local f = io.open(path, "w")
+      if f then
+        f:write((x == 2) and "full\n" or "lite\n")
+        f:close()
+      end
+    end
+  end)
+
+  -- ...and what it decided this time, so a CPU report comes with the one fact
+  -- that explains it. Read-only: it is an option param with a single option,
+  -- which is the only read-only text norns' menu has.
+  params:add_option("engine_now", "  running",
+    { LITE and "LITE" or "FULL" }, 1)
+
+  -- NEITHER OF THESE TWO TRAVELS IN A PSET. They describe the MACHINE, not the
+  -- patch: a pset carried from a Pi 4 to a factory norns would otherwise
+  -- arrive with its own idea of what the engine should be and quietly undo the
+  -- owner's override the moment they recalled a sound. set_save is guarded
+  -- because the test mock does not implement it.
+  if params.set_save then
+    params:set_save("engine_mode", false)
+    params:set_save("engine_now", false)
+  end
+
   -- SCREEN FPS.
   --
   -- On a norns, every screen call and every encoder event are handled by the
@@ -3025,7 +3254,16 @@ local function add_params()
   -- Nothing about the instrument changes with this - the animation is all
   -- time-based and advances by dt - it is the number of times a second the
   -- picture is rebuilt.
-  params:add_option("fps", "screen fps", { "25", "20", "15", "10" }, 1)
+  --
+  -- THE DEFAULT MOVES WITH THE MACHINE. On LITE the four settings below all
+  -- start at their cheaper end - fifteen frames, fifteen on the grid, LITE
+  -- detail, thirty modulator updates - because a factory norns wants all four
+  -- and asking its owner to find this page and set them one at a time is how
+  -- the reports kept arriving. They are still four separate params: an owner
+  -- who wants twenty-five frames on a Pi 3 can have them, and a pset that
+  -- stores its own values still wins over these.
+  params:add_option("fps", "screen fps", { "25", "20", "15", "10" },
+    LITE and 3 or 1)
   params:set_action("fps", function(x)
     FPS = ({ 25, 20, 15, 10 })[x] or 25
     if ui_metro then
@@ -3038,7 +3276,8 @@ local function add_params()
   -- cairo, but up to a hundred and twenty-eight LED writes and a serial frame
   -- per refresh. The display already skips a refresh when nothing on the grid
   -- moved; this caps how often it may send one when things ARE moving.
-  params:add_option("grid_fps", "grid fps", { "25", "15", "10" }, 1)
+  params:add_option("grid_fps", "grid fps", { "25", "15", "10" },
+    LITE and 2 or 1)
   params:set_action("grid_fps", function(x)
     GRID_FPS = ({ 25, 15, 10 })[x] or 25
   end)
@@ -3079,10 +3318,11 @@ local function add_params()
   -- Cells, headers, values, the grid and every number stay exactly as they
   -- are. This is the visualisers giving up some of their smoothness, which is
   -- the right thing to spend when the alternative is a knob that jumps.
-  params:add_option("detail", "screen detail", { "FULL", "LITE" }, 1)
+  params:add_option("detail", "screen detail", { "FULL", "LITE" },
+    LITE and 2 or 1)
   params:set_action("detail", function(x) DETAIL = x end)
 
-  params:add_option("mod_fps", "mod fps", { "60", "30" }, 1)
+  params:add_option("mod_fps", "mod fps", { "60", "30" }, LITE and 2 or 1)
   params:set_action("mod_fps", function(x)
     MOD_FPS = ({ 60, 30 })[x] or 60
     MOD_MAX_HZ = math.min(12, MOD_FPS / 5)
@@ -3328,7 +3568,14 @@ end
 
 local function advance(dt)
   advance_swarm(dt, 1)
-  advance_swarm(dt, 2)
+  -- On LITE there is no second granulator, so there is nothing for the second
+  -- model to be a model OF. This is the largest single thing the display tick
+  -- does twice: a capture trace, two playheads, eight grain marker lists and
+  -- eight flash timers, all of it advanced by dt whether the page is on screen
+  -- or not - because the trace has to be right when you arrive at the page,
+  -- not from the moment you arrive. Halving that is worth as much on the
+  -- encoder thread as the granulator itself is worth on the audio thread.
+  if not LITE then advance_swarm(dt, 2) end
 
   -- DELAY playhead sweeping one delay cycle, flashing taps as it crosses
   do
@@ -5746,7 +5993,13 @@ function spettru_strings(dt)
   local ease = seed and 1 or (1 - math.exp(-dt / math.max(rt * 1.6, 0.22)))
   local drive = math.min(out_amp_disp * 2.4, 1)
   local lo, hi = 1e9, -1e9
+  -- LITE draws the bank the engine is actually running - twenty-four strings,
+  -- not forty-eight. band_live is the same stride test the engine's own MODAL
+  -- split uses: partials one to three of each voice survive. A string for a
+  -- resonator that was never built is a picture of a sound nobody can hear,
+  -- and it is half of the most expensive loop on this page.
   for i = 1, NBAND do
+   if band_live(i) then
     local r = sring[i]
     local g0 = spettru_band_amp(i)
     local target = math.min(1, g0 * 3.5 * drive)
@@ -5757,6 +6010,7 @@ function spettru_strings(dt)
       if f < lo then lo = f end
       if f > hi then hi = f end
     end
+   end
   end
   if hi > lo then
     -- a third of an octave of air either side, and eased so a chord change
@@ -5794,7 +6048,7 @@ function draw_spettru()
   for i = 1, NBAND do
     local f = spettru_band_hz(i)
     local g = spettru_band_amp(i)
-    if f > 20 and g > 0.0005 then
+    if band_live(i) and f > 20 and g > 0.0005 then
       local r = sring[i]
       local x = freq_x(f)
       -- the visual pitch: 0.8 Hz at the bottom of the axis, 3.5 at the top.
@@ -6081,6 +6335,12 @@ meter_seen = { false, false, false, false, false, false, false }
 -- REVERB has no FEED of its own - see HAL_FEED below - so it is a plain
 -- spine box, the same as DELAY or COLOUR would be without their per-stage
 -- DRY IN.
+--
+-- On LITE, GR2 is not drawn and GR1 moves onto the chain's own row - see
+-- draw_hallat. One granulator sitting high and to the left of a centred chain,
+-- with a gap under it where the other one used to be, reads as something
+-- missing; on the middle row it reads as a chain that starts at the left,
+-- which is what it now is.
 local HAL_BOX = {
   { n = "GR1", x = 0,  row = -1, m = 1 },
   { n = "GR2", x = 0,  row =  1, m = 2 },
@@ -6096,6 +6356,8 @@ local HAL_BOX = {
 -- entry here on purpose.
 local HAL_FEED = { [3] = { "p_in1", "p_in2" }, [4] = { "s_in1", "s_in2" },
                    [5] = { "k_in1", "k_in2" }, [7] = { "o_in1", "o_in2" } }
+
+if LITE then HAL_BOX[1].row = 0 end
 
 local HAL_BW, HAL_BH = 18, 11
 
@@ -6202,10 +6464,16 @@ function draw_hallat()
   end
   screen.stroke()
 
+  -- On LITE there is one granulator, so there is one bus: the lower half of
+  -- the picture, GRAINSWARM 2's own, has nothing to carry. Its box goes with
+  -- it below - a box with a dead meter under a name for something that was
+  -- not built reads as a fault in the drawing rather than as a smaller
+  -- instrument.
+  local ngran = LITE and 1 or 2
   for _, b in ipairs(HAL_BOX) do
     local f = HAL_FEED[b.m]
     if f then
-      for gi = 1, 2 do
+      for gi = 1, ngran do
         local amt = pval(f[gi])
         if amt > 0.005 then
           local lvl = meters[gi] or 0
@@ -6225,6 +6493,7 @@ function draw_hallat()
   local selid = selc and selc.id
 
   for _, b in ipairs(HAL_BOX) do
+   if not (LITE and b.m == 2) then
     local x, y = hal_xy(b)
     local lv = meters[b.m] or 0
     local seen = meter_seen[b.m]
@@ -6259,6 +6528,7 @@ function draw_hallat()
     else
       screen.text(b.n)
     end
+   end
   end
 
   -- the selected feed pair is ringed, so E2/E3 are visibly attached to a box

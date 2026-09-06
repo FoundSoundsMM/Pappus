@@ -183,22 +183,28 @@ params:set("m_voices", 5); params:set("m_vspread", 0.6)
 -- GRAINSWARM 2, its own pages. The two things that only exist here: the RATE
 -- cell, which is decoupled by default and shows the chain mark only when set
 -- to LINK, and the waveform as cell zero carrying the source.
-goto_page(PG[3])
-params:set("n_src", 2)
-local function gtap2(x, y) mock.grid.key(x, y, 1); mock.grid.key(x, y, 0) end
-gtap2(4, 1); gtap2(11, 2)
-settle(60, 0.3, true); shot("3 GR2 waveform selected")
-assert(goto_cell(2), "could not reach GRAINSWARM 2's RATE cell")
-settle(8, 0.3, true); shot("3 GR2 RATE own division")
-params:set("n_rate_div", 11)            -- LINK: the last entry
-settle(8, 0.3, true); shot("3 GR2 RATE linked to GS1")
-params:set("n_rate_div", 5)
-assert(goto_cell(0), "could not get back to the visualiser")
-params:set("n_src", 1)
-settle(8, 0.3, true); shot("3 GR2 no input")
-params:set("n_src", 3)
-settle(8, 0.3, true); shot("3 GR2 mono left")
-params:set("n_src", 2)
+--
+-- Not on LITE, which has no second granulator and so no pages for it - see
+-- page_reachable in pappus.lua. Run this with PAPPUS_LITE=1 to render what a
+-- factory norns actually shows.
+if page_reachable(PG[3]) then
+  goto_page(PG[3])
+  params:set("n_src", 2)
+  local function gtap2(x, y) mock.grid.key(x, y, 1); mock.grid.key(x, y, 0) end
+  gtap2(4, 1); gtap2(11, 2)
+  settle(60, 0.3, true); shot("3 GR2 waveform selected")
+  assert(goto_cell(2), "could not reach GRAINSWARM 2's RATE cell")
+  settle(8, 0.3, true); shot("3 GR2 RATE own division")
+  params:set("n_rate_div", 11)            -- LINK: the last entry
+  settle(8, 0.3, true); shot("3 GR2 RATE linked to GS1")
+  params:set("n_rate_div", 5)
+  assert(goto_cell(0), "could not get back to the visualiser")
+  params:set("n_src", 1)
+  settle(8, 0.3, true); shot("3 GR2 no input")
+  params:set("n_src", 3)
+  settle(8, 0.3, true); shot("3 GR2 mono left")
+  params:set("n_src", 2)
+end
 
 goto_page(PG[5])
 local FF = {

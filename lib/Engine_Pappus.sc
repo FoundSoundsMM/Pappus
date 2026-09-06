@@ -14,6 +14,11 @@
 Engine_Pappus : CroneEngine {
 	var <synth, <buf, <bufr, <buf2, <buf2r, <dbuf, <envbufs, <patbuf, <patbuf2, <mbus;
 	var <loopbufs;
+	// LITE. True on a machine that cannot carry the whole graph - see
+	// prLiteMode for how that is decided and what LITE takes out. Read
+	// during the SynthDef function, so the def that gets compiled is
+	// already the right one; nothing is switched at run time.
+	var <lite = false;
 	// the seven meters' last shared bus read, and when it was taken
 	var mlast, mtime = 0;
 	var bufdur = 60.0;
@@ -36,6 +41,71 @@ Engine_Pappus : CroneEngine {
 		};
 	}
 
+	// ===================================================================
+	// LITE - WHICH MACHINE IS THIS
+	// ===================================================================
+	// A factory norns is a Raspberry Pi 3 compute module. A shield is
+	// whatever the owner put underneath it, which since 2019 is usually a
+	// Pi 4. The whole graph - two granulators, forty-eight resonators, a
+	// real short-time Fourier transform and one PlayBuf per file in audio/
+	// - measures comfortable on a Pi 4 and lands at ninety per cent plus,
+	// with audio dropouts, on a Pi 3. That is not a setting anybody should
+	// have to find: the def that gets compiled should already fit the
+	// machine it is compiled on.
+	//
+	// So: read the device tree, and if this is not a Pi 4 or newer, build
+	// the LITE graph instead. What LITE gives up is listed at each site,
+	// and pappus.lua runs THE SAME TEST (see lite_mode there) so the
+	// script's own pages agree with the engine about what exists.
+	//
+	// Three inputs, in order of authority:
+	//
+	//   PAPPUS_LITE      an environment variable, for the test harness -
+	//                    1/lite forces LITE, 0/full forces FULL
+	//   data/pappus/     mode.txt, holding "lite" or "full" - what the
+	//                    ENGINE param on PARAMS > PERFORMANCE writes, for
+	//                    an owner who disagrees with the detection
+	//   the device tree  bcm2711 (Pi 4, 400, CM4) and bcm2712 (Pi 5, CM5)
+	//                    are FULL; any other Raspberry Pi is LITE
+	//
+	// A machine with no device tree at all - a desktop running scsynth,
+	// which is where the tests run - is FULL. Unknown is not the same as
+	// slow, and crippling a developer's laptop to be safe would hide the
+	// full graph from the only place it is easy to look at.
+	prLiteMode {
+		var env, path, txt, dt = "";
+		env = "PAPPUS_LITE".getenv;
+		if(env.notNil) {
+			env = env.asString.toLower;
+			if(#["1", "lite", "true", "yes"].includes(env)) { ^true };
+			if(#["0", "full", "false", "no"].includes(env)) { ^false };
+		};
+		path = Platform.userHomeDir ++ "/dust/data/pappus/mode.txt";
+		if(File.exists(path)) {
+			txt = File.readAllString(path);
+			if(txt.notNil) {
+				txt = txt.toLower;
+				if(txt.contains("lite")) { ^true };
+				if(txt.contains("full")) { ^false };
+			};
+		};
+		// /proc/device-tree/compatible is NUL-separated - "raspberrypi,
+		// 4-model-b\0brcm,bcm2711" - and readAllString hands the NULs back
+		// as ordinary characters, so a substring search still finds either
+		// half. Both files are read because a Compute Module names itself
+		// in `model` and its SoC only in `compatible`.
+		#["/proc/device-tree/compatible", "/proc/device-tree/model"].do { arg f;
+			if(File.exists(f)) {
+				var t = File.readAllString(f);
+				if(t.notNil) { dt = dt ++ t.toLower ++ " " };
+			};
+		};
+		if(dt.contains("bcm").not and: { dt.contains("raspberry").not }) { ^false };
+		^#["bcm2711", "bcm2712", "pi 4", "pi 5",
+			"compute module 4", "compute module 5"].any({ arg k;
+				dt.contains(k) }).not;
+	}
+
 	// mkdir -p, one level at a time. File.mkdir will not create parents.
 	prMakeDir { arg path;
 		var parts, acc;
@@ -53,6 +123,12 @@ Engine_Pappus : CroneEngine {
 	prAlloc {
 		var srv = context.server;
 		var envnums, patvals, audioDir;
+
+		// FIRST, before anything is allocated: which graph is this going to
+		// be. Everything below reads it.
+		lite = this.prLiteMode;
+		("Engine_Pappus: " ++ (lite.if({ "LITE" }, { "FULL" })) ++ " graph")
+			.postln;
 
 		// GRAINSWARM capture. TWO MONO BUFFERS PER GRANULATOR, left and
 		// right, because GrainBuf reads a mono buffer - "the buffer holding a
@@ -73,8 +149,18 @@ Engine_Pappus : CroneEngine {
 		// buffer are not two granulators, they are one buffer read twice.
 		// Separate SOS, separate LOCK, separate TILT baked into the recording:
 		// that is the whole point of the pair.
-		buf2 = Buffer.alloc(srv, (bufdur * srv.sampleRate).asInteger, 1);
-		buf2r = Buffer.alloc(srv, (bufdur * srv.sampleRate).asInteger, 1);
+		//
+		// LITE has no second granulator, so this pair is a tenth of a second
+		// rather than sixty - twenty-three megabytes of resident memory that
+		// nothing would ever read. It is allocated rather than left nil so
+		// that bufclear, snapwrite and snapread stay valid commands with a
+		// real buffer at index 3 and 4: a snapshot saved on a Pi 4 and loaded
+		// on a factory norns should load its first granulator and quietly
+		// ignore the second, not raise inside the engine.
+		buf2 = Buffer.alloc(srv,
+			((lite.if({ 0.1 }, { bufdur })) * srv.sampleRate).asInteger, 1);
+		buf2r = Buffer.alloc(srv,
+			((lite.if({ 0.1 }, { bufdur })) * srv.sampleRate).asInteger, 1);
 
 		// DELAY delay line. Mono: taps are panned out to stereo, and keeping
 		// the feedback path mono is what stops the image wandering as it
@@ -751,10 +837,26 @@ Engine_Pappus : CroneEngine {
 				mspraymode, melen, mephase, mswarm, mswarmmode, mlock, msos,
 				mwinstart, mwinend, pitches, gates, probs);
 
-			graw2 = mkgrain.value(buf2, buf2r, patbuf2, nsrc, ntilt, nrate, nsize,
-				nbuflen, ncontour, nstrum, nscan, nscanmode, ndelay, nspray,
-				nspraymode, nelen, nephase, nswarm, nswarmmode, nlock, nsos,
-				nwinstart, nwinend, pitches2, gates2, probs2);
+			// ...and on LITE there is only one.
+			//
+			// THIS IS THE WHOLE POINT OF LITE. A granulator is eight voices,
+			// each of them two mono GrainBufs for the main grain plus two
+			// more for the swarm duplicates, over a buffer the same voice is
+			// still recording into - and it is far and away the largest thing
+			// in this graph. Measured against everything else here, the pair
+			// is about forty per cent of the engine's DSP load on its own.
+			//
+			// The `n` controls all still EXIST - every one of them is still
+			// declared above and every nrate/nsize/nsrc command still lands
+			// somewhere harmless - so nothing in Lua has to know, no command
+			// becomes an error, and a pset written on a Pi 4 loads here
+			// without complaint. It simply has nothing to drive.
+			graw2 = if(lite) { DC.ar([0, 0]) } {
+				mkgrain.value(buf2, buf2r, patbuf2, nsrc, ntilt, nrate, nsize,
+					nbuflen, ncontour, nstrum, nscan, nscanmode, ndelay, nspray,
+					nspraymode, nelen, nephase, nswarm, nswarmmode, nlock, nsos,
+					nwinstart, nwinend, pitches2, gates2, probs2);
+			};
 
 			// The faders LAST, both of them, so neither raw output has to stay
 			// alive alongside a faded copy of itself. Two live wires either
@@ -769,7 +871,12 @@ Engine_Pappus : CroneEngine {
 			// alive to the bottom of the graph so they could be measured
 			// together would cost twelve.
 			mt1 = Amplitude.kr((gsum[0] + gsum[1]) * 0.5, 0.01, 0.2);
-			mt2 = Amplitude.kr((gsum2[0] + gsum2[1]) * 0.5, 0.01, 0.2);
+			// LITE's GRAINSWARM 2 has nothing to measure, and a meter that
+			// follows an Amplitude of silence is still an Amplitude. Lua
+			// draws no GR2 box on SIGNAL in LITE, so nothing reads this.
+			mt2 = if(lite) { DC.kr(0) } {
+				Amplitude.kr((gsum2[0] + gsum2[1]) * 0.5, 0.01, 0.2);
+			};
 
 			// =============================================================
 			// RESONATOR - a Rings-style modal/string resonator
@@ -801,9 +908,20 @@ Engine_Pappus : CroneEngine {
 			// at the level you set. A pair of gains that quietly ducked when
 			// you raised the other one would make the wireframe on SIGNAL a
 			// lie about what it is showing.
-			gfeed = { arg a, b;
-				[(gsum[0] * Lag.kr(a, 0.05)) + (gsum2[0] * Lag.kr(b, 0.05)),
-				 (gsum[1] * Lag.kr(a, 0.05)) + (gsum2[1] * Lag.kr(b, 0.05))];
+			//
+			// On LITE the second term is dropped rather than multiplied by
+			// silence. It is only four multiplies at each of the four feed
+			// points, but there are four points and this is the graph that
+			// could not afford the second granulator in the first place.
+			gfeed = if(lite) {
+				{ arg a, b;
+					[gsum[0] * Lag.kr(a, 0.05), gsum[1] * Lag.kr(a, 0.05)];
+				}
+			} {
+				{ arg a, b;
+					[(gsum[0] * Lag.kr(a, 0.05)) + (gsum2[0] * Lag.kr(b, 0.05)),
+					 (gsum[1] * Lag.kr(a, 0.05)) + (gsum2[1] * Lag.kr(b, 0.05))];
+				}
 			};
 
 			pin = gfeed.value(pin1, pin2);
@@ -829,14 +947,24 @@ Engine_Pappus : CroneEngine {
 			pgwash = Select.ar((pgraintype - 1).clip(0, 2),
 				[WhiteNoise.ar(1), PinkNoise.ar(1.6), Dust2.ar(1800)]);
 			pgwash = BPF.ar(pgwash, 2200, 0.5);
+			// LITE points ONE player at the chosen file rather than running
+			// one per file - see the note on COLOUR's own loops below, which
+			// does exactly the same thing for exactly the same reason.
 			if(loopbufs.size > 0) {
 				var sel = (pgraintype - 4).clip(0, loopbufs.size - 1);
-				var sigs = loopbufs.collect({ arg b;
-					var s = PlayBuf.ar(2, b.bufnum,
-						BufRateScale.kr(b.bufnum), loop: 1);
-					(s[0] + s[1]) * 0.5;
-				});
-				pgloop = Select.ar(sel, sigs);
+				if(lite) {
+					var bn = Select.kr(sel,
+						loopbufs.collect({ arg b; b.bufnum }));
+					var s = PlayBuf.ar(2, bn, BufRateScale.kr(bn), loop: 1);
+					pgloop = (s[0] + s[1]) * 0.5;
+				} {
+					var sigs = loopbufs.collect({ arg b;
+						var s = PlayBuf.ar(2, b.bufnum,
+							BufRateScale.kr(b.bufnum), loop: 1);
+						(s[0] + s[1]) * 0.5;
+					});
+					pgloop = Select.ar(sel, sigs);
+				};
 				pglp = Lag.kr(pgraintype > 3.5, 0.05);
 			} {
 				pgloop = DC.ar(0);
@@ -865,11 +993,56 @@ Engine_Pappus : CroneEngine {
 			// Odd resonators left, even right, same bank FILTERBANK ran.
 			// STRUCTURE and POSITION are already baked into pfrq/pamp in Lua,
 			// so this half of the graph is unchanged from before.
-			pones = Array.fill(24, 1);
-			pfl = Array.fill(24, { arg i; Lag.kr(pfrq[i * 2], 0.012) });
-			pfr = Array.fill(24, { arg i; Lag.kr(pfrq[(i * 2) + 1], 0.012) });
-			pal = Array.fill(24, { arg i; Lag.kr(pamp[i * 2], 0.03) });
-			par = Array.fill(24, { arg i; Lag.kr(pamp[(i * 2) + 1], 0.03) });
+			//
+			// LITE RUNS TWENTY-FOUR OF THE FORTY-EIGHT: partials one to three
+			// of each voice, the fourth to sixth dropped. Lua's layout is
+			// voice-major with a stride of six (index (v-1)*6 + k, see
+			// spettru_layout), so the survivors are the first three of each
+			// group of six and the frequencies still arrive in the same
+			// forty-eight slots - the array Lua sends is identical either way.
+			//
+			// Dropping the top three is the right three to drop: BRIGHTNESS
+			// is an exponential falloff across the series, so partials four to
+			// six are already the quietest, and what goes with them is the
+			// upper sparkle rather than the pitch. It is not free - a bank has
+			// a slightly duller character - but it is twenty-four two-pole
+			// resonators, all of them recomputing coefficients every block
+			// because their frequencies are modulated.
+			//
+			// THE SPLIT ALTERNATES BY VOICE. Straight parity across a group of
+			// three would hand two of every trio to one side and one to the
+			// other, and eight voices of that is sixteen resonators left
+			// against eight right - a bank audibly heavier on one side.
+			// Flipping which side gets the pair on odd voices makes it twelve
+			// and twelve, and each voice still lands in both channels.
+			//
+			// The LEVEL is not fudged here to make up for the missing half:
+			// Lua normalises the bank to constant total power over the
+			// partials THIS BUILD ACTUALLY USES (see NPART_USE in
+			// spettru_layout), so a LITE bank comes out at the same level as a
+			// FULL one by construction rather than by a guessed constant.
+			if(lite) {
+				var li = [], ri = [];
+				8.do { arg v;
+					var a = (v * 6), b = (v * 6) + 1, c = (v * 6) + 2;
+					if(v.even) {
+						li = li ++ [a, c]; ri = ri ++ [b];
+					} {
+						ri = ri ++ [a, c]; li = li ++ [b];
+					};
+				};
+				pones = Array.fill(li.size, 1);
+				pfl = li.collect({ arg ix; Lag.kr(pfrq[ix], 0.012) });
+				pfr = ri.collect({ arg ix; Lag.kr(pfrq[ix], 0.012) });
+				pal = li.collect({ arg ix; Lag.kr(pamp[ix], 0.03) });
+				par = ri.collect({ arg ix; Lag.kr(pamp[ix], 0.03) });
+			} {
+				pones = Array.fill(24, 1);
+				pfl = Array.fill(24, { arg i; Lag.kr(pfrq[i * 2], 0.012) });
+				pfr = Array.fill(24, { arg i; Lag.kr(pfrq[(i * 2) + 1], 0.012) });
+				pal = Array.fill(24, { arg i; Lag.kr(pamp[i * 2], 0.03) });
+				par = Array.fill(24, { arg i; Lag.kr(pamp[(i * 2) + 1], 0.03) });
+			};
 			fmodal = [
 				DynKlank.ar(`[pfl, pal, pones], pana, 1, 0, prng),
 				DynKlank.ar(`[pfr, par, pones], pana, 1, 0, prng)
@@ -906,11 +1079,25 @@ Engine_Pappus : CroneEngine {
 			// crossfades, so each voice stays centred like its MODAL
 			// counterpart does.
 			fstring = DC.ar([0, 0]);
+			// LITE RUNS ONE COMB PER VOICE, not two. The second one is
+			// STRUCTURE's dispersion - a detuned copy mixed in at 0.35 - so on
+			// LITE the STRING half of MODE loses its inharmonicity and becomes
+			// a plain Karplus-Strong string. That is eight delay lines with
+			// interpolated reads out of sixteen, and the level it costs is
+			// half a decibel (two signals at 1 and 0.35, largely
+			// uncorrelated), which is inside what DAMPING's own normalisation
+			// already moves.
+			//
+			// STRUCTURE still works on MODAL, which is where it does most of
+			// its listening anyway.
 			8.do { arg i;
 				var period = 1 / svfrq[i];
 				var exc = pana - DelayC.ar(pana, 0.06, spos * period);
-				var voice = CombL.ar(exc, 0.06, period, sdec)
-					+ (CombL.ar(exc, 0.06, period * sdet, sdec) * 0.35);
+				var voice = CombL.ar(exc, 0.06, period, sdec);
+				if(lite.not) {
+					voice = voice
+						+ (CombL.ar(exc, 0.06, period * sdet, sdec) * 0.35);
+				};
 				fstring = fstring + Pan2.ar(voice * svamp[i], 0);
 			};
 			fstring = fstring * (0.6 / ((1 + (sdec * 3)) ** 0.3));
@@ -1199,26 +1386,59 @@ Engine_Pappus : CroneEngine {
 			//
 			// Same UGen count and same wiring as before: one FFT in, one
 			// IFFT out. Only the numbers moved.
-			lchain = FFT(LocalBuf(512).clear, lmono, 0.5, 0);
-			// Bin magnitudes scale with the window's COHERENT GAIN as well as
-			// its size, so this constant moved with the window above. A
-			// Hann-windowed 512-point FFT puts a full-scale sine's peak bin
-			// at N/2 x 0.5 = 128; a sine window's coherent gain is 2/pi, so
-			// the same tone now peaks at 256 x 0.6366 = 163. Left at 128 the
-			// threshold would sit a quarter of the way low and LOSS would
-			// quietly have got weaker across its whole travel - the knob has
-			// to mean what it meant.
-			lthr = Amplitude.kr(lmono, 0.02, 0.15) * 163 * ls.squared * 0.45;
-			lchain = PV_MagAbove(lchain, lthr);
-			// Bandwidth holds up until the knob is well past halfway and only
-			// then falls off a cliff, which is how bitrate actually behaves -
-			// a gentle curve here just sounds like someone closing a filter.
-			lchain = PV_BrickWall(lchain, 0 - ((ls ** 2.2) * 0.86));
-			lossmono = IFFT(lchain);
-			// An FFT costs one window of delay. The dry side of the blend has
-			// to be delayed to match or the low end of the knob is a comb
-			// filter rather than a fade.
-			ldry = DelayN.ar(sig, 0.05, 512 / SampleRate.ir);
+			//
+			// ...and LITE DOES NOT RUN THE TRANSFORM AT ALL.
+			//
+			// This is the second-largest saving after the granulator, and it
+			// is the one worth taking first, because the FFT costs the same
+			// whether LOSS is up or down - three hundred and seventy-five
+			// forward and inverse transforms a second, every second, on a
+			// machine that is already late.
+			//
+			// What stands in for it is two cascaded second-order lowpasses -
+			// twenty-four decibels an octave - swept from above the band down
+			// to about eight hundred hertz. That is the half of LOSS the ear
+			// reads as bitrate, bandwidth being thrown away, without the other
+			// half: the per-bin gating that gives a real codec its warble and
+			// its dropouts. So on LITE the knob still closes the sound down
+			// the way it did and still lands somewhere musically useful; it
+			// just does it as a filter rather than as damage. That is said out
+			// loud in the readme rather than hidden, because a knob that does
+			// something DIFFERENT is worth knowing about - and a knob that did
+			// nothing at all would have been worse.
+			//
+			// Same curve as the real one's bandwidth term, ls ** 2.2: flat
+			// most of the way up and then off a cliff, which is how bitrate
+			// actually behaves. No delay compensation, because a filter has
+			// no window of latency to compensate for - which also means the
+			// bottom of the knob is exactly the dry signal, not a
+			// sample-aligned copy of it.
+			if(lite) {
+				var lcut = 18000 * (0.045 ** (ls ** 2.2));
+				lossmono = LPF.ar(LPF.ar(lmono, lcut), lcut);
+				ldry = sig;
+			} {
+				lchain = FFT(LocalBuf(512).clear, lmono, 0.5, 0);
+				// Bin magnitudes scale with the window's COHERENT GAIN as well as
+				// its size, so this constant moved with the window above. A
+				// Hann-windowed 512-point FFT puts a full-scale sine's peak bin
+				// at N/2 x 0.5 = 128; a sine window's coherent gain is 2/pi, so
+				// the same tone now peaks at 256 x 0.6366 = 163. Left at 128 the
+				// threshold would sit a quarter of the way low and LOSS would
+				// quietly have got weaker across its whole travel - the knob has
+				// to mean what it meant.
+				lthr = Amplitude.kr(lmono, 0.02, 0.15) * 163 * ls.squared * 0.45;
+				lchain = PV_MagAbove(lchain, lthr);
+				// Bandwidth holds up until the knob is well past halfway and only
+				// then falls off a cliff, which is how bitrate actually behaves -
+				// a gentle curve here just sounds like someone closing a filter.
+				lchain = PV_BrickWall(lchain, 0 - ((ls ** 2.2) * 0.86));
+				lossmono = IFFT(lchain);
+				// An FFT costs one window of delay. The dry side of the blend has
+				// to be delayed to match or the low end of the knob is a comb
+				// filter rather than a fade.
+				ldry = DelayN.ar(sig, 0.05, 512 / SampleRate.ir);
+			};
 			// linear, not equal-power: the two sides are the same signal, one
 			// of them mangled, so they add rather than sum in power. An
 			// XFade2 here put a measured +3 dB bump in the middle of the knob.
@@ -1261,19 +1481,46 @@ Engine_Pappus : CroneEngine {
 			// same "always compute, only pick at the end" shape WHITE/PINK/
 			// DUST already use above, just over a list whose length is not
 			// known until the folder is scanned.
+			//
+			// LITE PLAYS ONE FILE, NOT ALL OF THEM. PlayBuf's bufnum is an
+			// ordinary input, so it can be switched at run time - which turns
+			// "every loop always playing, pick one at the end" into "one
+			// player, pointed at the chosen buffer". With the five files that
+			// ship in audio/ that is one stereo interpolated buffer read
+			// instead of five, and RESONATOR's own GRAIN loops below do the
+			// same, so between them LITE runs two of these where FULL runs
+			// ten. On a Pi 3 that is memory bandwidth as much as it is DSP,
+			// and it gets worse for every file the owner adds.
+			//
+			// What it costs is the switch: the shared player keeps its phase
+			// when the buffer under it changes, so changing N.TYPE from one
+			// loop to another jumps into the middle of the new file rather
+			// than crossfading between two already-running ones. For a
+			// texture bed that is not a musical event, and it is the same
+			// jump you get on FULL the first time a loop is selected.
 			if(loopbufs.size > 0) {
 				var nloopn = loopbufs.size;
 				var nloopsigs;
 				nloopsel = (noisetype - 4).clip(0, nloopn - 1);
 				nlooprate = Lag.kr(noisetone, 0.05) / 1200;
-				nloopsigs = loopbufs.collect({ arg b;
-					PlayBuf.ar(2, b.bufnum,
-						nlooprate * BufRateScale.kr(b.bufnum), loop: 1);
-				});
-				nloop = [
-					Select.ar(nloopsel, nloopsigs.collect({ arg s; s[0] })),
-					Select.ar(nloopsel, nloopsigs.collect({ arg s; s[1] }))
-				];
+				if(lite) {
+					var bn = Select.kr(nloopsel,
+						loopbufs.collect({ arg b; b.bufnum }));
+					var s = PlayBuf.ar(2, bn,
+						nlooprate * BufRateScale.kr(bn), loop: 1);
+					nloop = [s[0], s[1]];
+				} {
+					nloopsigs = loopbufs.collect({ arg b;
+						PlayBuf.ar(2, b.bufnum,
+							nlooprate * BufRateScale.kr(b.bufnum), loop: 1);
+					});
+					nloop = [
+						Select.ar(nloopsel,
+							nloopsigs.collect({ arg s; s[0] })),
+						Select.ar(nloopsel,
+							nloopsigs.collect({ arg s; s[1] }))
+					];
+				};
 				// Unmeasured and un-levelled: a file dropped into audio/ has
 				// not been matched to anything, so this is only a sanity
 				// gain against the washes' own level, not a promise.
@@ -1433,9 +1680,18 @@ Engine_Pappus : CroneEngine {
 			// DIFFUSE - four allpasses per channel at mutually prime times,
 			// offset between the two channels to keep the stereo image from
 			// collapsing back to mono.
+			//
+			// LITE runs TWO allpasses a side rather than four. Diffusion is a
+			// diminishing return - each stage smears what the one before it
+			// already smeared - so the audible difference between two and four
+			// is a tail that is slightly grainier at the very start, on a tank
+			// whose whole job is to be indistinct. Four interpolated delay
+			// lines is not the biggest thing LITE gives up, but it is four.
 			rwet = rtankc.collect({ arg x, c;
 				var sp = 1 + (c * 0.19);
-				[0.0149, 0.0223, 0.0307, 0.0389].do({ arg dt;
+				var stages = if(lite) { [0.0149, 0.0307] }
+					{ [0.0149, 0.0223, 0.0307, 0.0389] };
+				stages.do({ arg dt;
 					x = AllpassC.ar(x, 0.16, (dt * sp * rsize).min(0.155),
 						dt * sp * rsize * 11);
 				});

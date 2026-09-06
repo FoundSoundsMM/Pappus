@@ -7,6 +7,7 @@ buffer numbers and allocate/fill the matching buffers in the Score.
 import math
 import subprocess
 import os
+import sys
 
 ENGINE = os.path.join(os.path.dirname(__file__), "..", "lib", "Engine_Pappus.sc")
 
@@ -103,17 +104,26 @@ STUBS = """
         mbus=METER_BUS, del_=DEL_BUF, e0=ENV_BUF0, e1=ENV_BUF0 + 16, bufdur=BUFDUR)
 
 
-def build(script_body, patches=(), fill_env=True):
+# LITE. The engine builds one of two graphs depending on the machine it is
+# allocated on (see prLiteMode in Engine_Pappus.sc), and the SynthDef function
+# reads the instance var to decide. Off-device there is no machine to detect,
+# so it is stubbed - false by default, because FULL is the graph every existing
+# test in here was written against. Set it, or pass lite=True to build(), to
+# render the graph a factory norns actually gets.
+LITE = False
+
+
+def build(script_body, patches=(), fill_env=True, lite=None):
     import re
     body = synthdef_body(patches)
     # Point the engine's instance vars at the stubs. Word boundaries matter:
     # a plain replace of "buf" also mangles "patbuf" into "pat~buf".
     for name in ("buf", "bufr", "buf2", "buf2r", "dbuf", "patbuf", "patbuf2",
-                 "mbus", "envnums", "bufdur", "deldur"):
+                 "mbus", "envnums", "bufdur", "deldur", "lite"):
         body = re.sub(r"\b%s\b" % name, "~" + name, body)
     leftovers = re.findall(
         r"(?<!~)\b(?:buf2r|buf2|bufr|patbuf2|buf|dbuf|patbuf|mbus|envnums"
-        r"|bufdur|deldur)\b",
+        r"|bufdur|deldur|lite)\b",
         body)
     assert not leftovers, "unstubbed engine vars: %s" % set(leftovers)
     assert "pat~buf" not in body and "~~" not in body, "substitution damaged the body"
@@ -125,7 +135,9 @@ def build(script_body, patches=(), fill_env=True):
               "File.mkdir(~qdefdir);\n"
               "~qdef.writeDefFile(~qdefdir);\n"
               '~qrecv = ["/d_load", ~qdefdir ++ "/pappus.scsyndef"];\n')
-    return STUBS + "\n~alloc = [\n" + ",\n".join(alloc_msgs(fill_env)) + "\n];\n" \
+    liteflag = LITE if lite is None else lite
+    return STUBS + ("~lite = %s;\n" % ("true" if liteflag else "false")) \
+        + "\n~alloc = [\n" + ",\n".join(alloc_msgs(fill_env)) + "\n];\n" \
         + "~qdef = " + body + ";\n" + loader + script_body
 
 
@@ -134,9 +146,15 @@ def run(scd_text, path, timeout=600, expect="DONE"):
     forever, so treat a timeout as a failure and surface whatever it printed."""
     open(path, "w").write(scd_text)
     env = dict(os.environ)
-    env.update(QT_QPA_PLATFORM="offscreen",
-               QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox --disable-gpu",
+    env.update(QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox --disable-gpu",
                XDG_RUNTIME_DIR="/tmp/runtime-root")
+    # offscreen is a LINUX-ONLY workaround: sclang links Qt and refuses to
+    # start without a display. The macOS SuperCollider.app does not ship the
+    # offscreen plugin at all, so forcing it there fails with "no Qt platform
+    # plugin could be initialized" and every one of these tests is unrunnable
+    # on the machine the engine is actually written on. Cocoa is always there.
+    if sys.platform != "darwin":
+        env["QT_QPA_PLATFORM"] = "offscreen"
     try:
         r = subprocess.run(["sclang", "-i", "none", path], capture_output=True,
                            text=True, timeout=timeout, env=env)

@@ -48,8 +48,15 @@ local function on_grid(v, q)
 end
 
 -- every continuous cell in the instrument, with the page and cell to reach it
+--
+-- Pages you cannot navigate to are skipped, not tested from wherever the walk
+-- happened to stop: on LITE, GRAINSWARM 2's two pages are not in either lane
+-- (the engine has no second granulator), so goto_page_index cannot reach them
+-- and a knob test that carried on regardless would drive page 2's cells while
+-- reading page 4's parameters.
 local CELLS = {}
 for pi, pg in ipairs(pappus.pages) do
+ if page_reachable(pi) then
   for ci, c in ipairs(pg.cells) do
     local p = params:lookup_param(c.id)
     if p and p.controlspec and c.id ~= "clock_tempo" then
@@ -57,6 +64,7 @@ for pi, pg in ipairs(pappus.pages) do
                             label = c.label, alt = c.alt, mode = c.mode }
     end
   end
+ end
 end
 assert(#CELLS > 20, "only found " .. #CELLS .. " continuous cells")
 

@@ -12,6 +12,12 @@ the code:
 
 Also checks that at CRUSH 0 the mode is transparent (bar the FFT's one window
 of latency, which is delay-compensated in the blend but not removed).
+
+THIS DESCRIBES THE FULL GRAPH. On LITE there is no transform - LOSS is two
+cascaded lowpasses standing in for the bandwidth half of it, and nothing
+standing in for the per-bin gating - so claim 1 still holds there and claim 2
+deliberately does not. That is why this test runs against FULL only (the
+harness default) rather than sweeping both.
 """
 import sys, os, math
 sys.path.insert(0, os.path.dirname(__file__))

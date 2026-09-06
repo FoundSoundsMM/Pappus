@@ -38,7 +38,7 @@ WIRE_BUFS = 64
 # The engine's instance vars, longest first: a plain \bbuf\b would also eat
 # the "buf" inside "patbuf".
 IVARS = ("buf2r", "buf2", "bufr", "buf", "dbuf", "patbuf2", "patbuf",
-         "mbus", "envnums", "bufdur", "deldur", "loopbufs")
+         "mbus", "envnums", "bufdur", "deldur", "loopbufs", "lite")
 
 
 def find_sclang():
@@ -67,7 +67,7 @@ def synthdef_body():
     return body
 
 
-def script(body, workdir, nloops):
+def script(body, workdir, nloops, lite=False):
     # Buffers are stubbed as Events so that `.bufnum` answers, which is all
     # the graph ever asks of them.
     loops = ", ".join("~mk.(%d)" % (30 + i) for i in range(nloops))
@@ -79,6 +79,7 @@ def script(body, workdir, nloops):
 ~envnums = (10..26);
 ~bufdur = 60.0; ~deldur = 11.0;
 ~loopbufs = [%(loops)s];
+~lite = %(lite)s;
 
 ~d = %(body)s;
 "DEF BUILT".postln;
@@ -104,17 +105,17 @@ def script(body, workdir, nloops):
 		.numWireBufs_(%(wires)d).memSize_(65536),
 	action: { "NRT DONE".postln; 0.exit });
 """ % dict(body=body, dir=workdir, wires=WIRE_BUFS, loops=loops,
-           lastloop=29 + nloops)
+           lastloop=29 + nloops, lite=("true" if lite else "false"))
 
 
-def run(nloops):
+def run(nloops, lite=False):
     sclang = find_sclang()
     if not sclang:
         print("SKIP: no sclang found. Install SuperCollider to run this test.")
         return None
     work = tempfile.mkdtemp(prefix="pappus-defload-")
     path = os.path.join(work, "check.scd")
-    open(path, "w").write(script(synthdef_body(), work, nloops))
+    open(path, "w").write(script(synthdef_body(), work, nloops, lite))
     try:
         # A syntax error leaves sclang sitting in its REPL forever, so stdin is
         # closed and the wait is bounded.
@@ -152,13 +153,28 @@ if __name__ == "__main__":
     nloops = 5
     if "--loops" in sys.argv:
         nloops = int(sys.argv[sys.argv.index("--loops") + 1])
-    print("loading the SynthDef into scsynth with %d wire buffers, "
-          "%d loop file(s) in audio/ ..." % (WIRE_BUFS, nloops))
-    fails = run(nloops)
-    if fails is None:
-        sys.exit(0)
-    if fails:
-        for f in fails:
-            print("  FAIL " + f)
-        sys.exit(1)
-    print("DEF LOAD TEST OK  (scsynth accepted the def and made the synth)")
+    # BOTH GRAPHS, always. The engine compiles FULL or LITE depending on the
+    # machine it is allocated on, so "the def loads" is two claims, and the
+    # one that is easy to forget is the one that only ever runs on somebody
+    # else's factory norns.
+    modes = [False, True]
+    if "--lite" in sys.argv:
+        modes = [True]
+    if "--full" in sys.argv:
+        modes = [False]
+    bad = 0
+    for lite in modes:
+        name = "LITE" if lite else "FULL"
+        print("loading the %s SynthDef into scsynth with %d wire buffers, "
+              "%d loop file(s) in audio/ ..." % (name, WIRE_BUFS, nloops))
+        fails = run(nloops, lite)
+        if fails is None:
+            sys.exit(0)
+        if fails:
+            bad += 1
+            for f in fails:
+                print("  FAIL [%s] %s" % (name, f))
+        else:
+            print("  %s OK  (scsynth accepted the def and made the synth)"
+                  % name)
+    sys.exit(1 if bad else 0)
