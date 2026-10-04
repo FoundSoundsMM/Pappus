@@ -1434,10 +1434,16 @@ Engine_Pappus : CroneEngine {
 				// a gentle curve here just sounds like someone closing a filter.
 				lchain = PV_BrickWall(lchain, 0 - ((ls ** 2.2) * 0.86));
 				lossmono = IFFT(lchain);
-				// An FFT costs one window of delay. The dry side of the blend has
-				// to be delayed to match or the low end of the knob is a comb
-				// filter rather than a fade.
-				ldry = DelayN.ar(sig, 0.05, 512 / SampleRate.ir);
+				// FFT>IFFT costs one window LESS ONE CONTROL BLOCK of delay -
+				// measured in scsynth NRT at 512 - 64 = 448 samples, not 512.
+				// The dry side of the blend has to be delayed to match or the
+				// low end of the knob is a comb filter rather than a fade: at a
+				// full window the dry ran 64 samples late, notches every 750 Hz,
+				// heard as flanging around 30% where the two sides are near
+				// equal. The extra half sample is because DelayN rounds to a
+				// whole sample and an exact 448/SR came out as 447. With the PV
+				// stages doing nothing this nulls against the dry to ~-135 dB.
+				ldry = DelayN.ar(sig, 0.05, (512 - BlockSize.ir + 0.5) / SampleRate.ir);
 			};
 			// linear, not equal-power: the two sides are the same signal, one
 			// of them mangled, so they add rather than sum in power. An
